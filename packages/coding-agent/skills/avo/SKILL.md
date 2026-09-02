@@ -140,12 +140,19 @@ Never pass or request an environment override.
    workspace edit or fresh candidate by itself no longer counts as qualified
    progress. Reading,
    narrating, repeating the same failed check, inspecting Prime internals, or
-   merely saying done does not. Six consecutive tool batches without a
-   milestone inject an immediate steering intervention. A host-bounded tool
-   timeout intervenes immediately without waiting for six batches and requires
-   a bounded reproducer plus a nontermination fix before retrying. At blocked root-turn
-   boundaries, one empty turn triggers a corrective watch, two trigger
-   intervention, and three escalate an automatic horizon to long.
+   merely saying done does not. Four consecutive tool batches without a
+   milestone inject immediate steering and activate state-aware IPython
+   probation: the next cell must invoke the exact next AVO action permitted by
+   current host state. A host-bounded tool timeout intervenes immediately
+   without waiting for four batches and requires a bounded reproducer plus a
+   nontermination fix before retrying. At blocked root-turn boundaries, one
+   empty turn triggers a corrective watch, two trigger intervention, and three
+   may escalate an automatic horizon to long only before the coding
+   candidate-admission contract is locked. Once a coding baseline execution,
+   candidate, evaluation, or experiment has begun, watchdog steering cannot
+   add new horizon-derived candidate prerequisites. Follow the exact recovery
+   action in the intervention rather than probing the API or repeating an
+   unchanged verifier.
    Repeatedly changing or decorating an already verified canonical delivery
    triggers a separate delivery intervention without weakening its exact bind.
    Automatic routing never lowers an active horizon.
