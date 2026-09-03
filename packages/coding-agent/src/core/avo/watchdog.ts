@@ -81,6 +81,7 @@ export function deriveAvoProgressWatchdogSnapshot(
 		.sort();
 	const hasObservableProgress =
 		baselineExecutionIds.length > 0 ||
+		candidateIdentities.length > 0 ||
 		meaningfulHostPasses.length > 0 ||
 		cycleIdentities.length > 0 ||
 		trialIdentities.length > 0 ||
@@ -91,6 +92,7 @@ export function deriveAvoProgressWatchdogSnapshot(
 		runId: state.runId,
 		token: stableToken({
 			baselineExecutionIds,
+			candidateIdentities,
 			meaningfulHostPasses,
 			cycleIdentities,
 			trialIdentities,
@@ -119,6 +121,9 @@ function progressIndicators(
 	const indicators: string[] = [];
 	if (current.baselineExecutionCount > (previous?.baselineExecutionCount ?? 0)) {
 		indicators.push("a meaningful immutable baseline check ran");
+	}
+	if (current.candidateCount > (previous?.candidateCount ?? 0)) {
+		indicators.push("a new candidate was registered");
 	}
 	if (current.meaningfulHostPassCount > (previous?.meaningfulHostPassCount ?? 0)) {
 		indicators.push("new meaningful host evidence passed");

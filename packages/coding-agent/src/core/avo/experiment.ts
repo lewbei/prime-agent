@@ -636,6 +636,16 @@ function deriveSelectionEvidence(
 	plan: AvoExperimentPlan,
 ): AvoExperimentSelectionEvidence {
 	const reservation = plan.selectionReservation!;
+	if (comparison.delta.ci95DegreesOfFreedom < 1) {
+		return {
+			...structuredClone(reservation),
+			candidateId: comparison.candidateId,
+			oneSidedPValue: 1,
+			oneSidedConfidenceLevel: 1 - reservation.allocatedAlpha,
+			favorableLowerBound: comparison.favorableMean,
+			passed: false,
+		};
+	}
 	const standardError = comparison.delta.standardDeviation / Math.sqrt(comparison.delta.count);
 	const testStatistic =
 		standardError === 0

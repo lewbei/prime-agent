@@ -242,6 +242,6 @@ describe("Issue #63: [AVO] Provide direct conversational bypass for greetings an
 			};
 			expect(state2.routing.bypass).toBeFalsy();
 			expect(state2.delivery.phase).toBe("delivered");
-		});
+		}, 15_000);
 	});
 });

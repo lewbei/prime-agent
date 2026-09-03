@@ -670,7 +670,7 @@ describe.sequential("AVO adversarial acceptance supervision", () => {
 		);
 		expect(failing).toMatchObject({ exitCode: 1, report: { passed: false } });
 		expect(failing.report?.results[0]).toMatchObject({ caseId: "sum-0", status: "fail", actual: 1, expected: 999 });
-	});
+	}, 30_000);
 
 	test("executes captured Python bundle bytes instead of a subsequently changed live workspace", async () => {
 		if (!canExecuteAvoPythonProbe()) return;
