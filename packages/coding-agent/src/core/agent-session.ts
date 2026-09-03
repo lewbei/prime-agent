@@ -2588,6 +2588,7 @@ export class AgentSession {
 		if (
 			this._enforceAvoCompletion &&
 			avoBoundaryState?.status === "active" &&
+			avoBoundaryState.routing.bypass !== true &&
 			(avoBoundaryState.delivery.phase === "accepted" || avoBoundaryState.delivery.phase === "pending")
 		) {
 			const completed = await this._completeAvoCanonicalDeliveryIfMatching(context);
@@ -2627,7 +2628,9 @@ export class AgentSession {
 		}
 		if (
 			this._stopGoalContinuationForTerminalMessage(context.message) &&
-			(!this._enforceAvoCompletion || this._avoRuntime?.getState().status !== "active")
+			(!this._enforceAvoCompletion ||
+				this._avoRuntime?.getState().status !== "active" ||
+				this._avoRuntime?.getState().routing.bypass === true)
 		) {
 			return true;
 		}
@@ -9149,7 +9152,8 @@ export class AgentSession {
 			!this._avoRuntime ||
 			this._rlmDepth !== 0 ||
 			signal?.aborted ||
-			context.message.stopReason === "aborted"
+			context.message.stopReason === "aborted" ||
+			this._avoRuntime.getState().routing.bypass === true
 		) {
 			return undefined;
 		}
@@ -9325,6 +9329,9 @@ export class AgentSession {
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<CustomMessage | undefined> {
+		if (this._avoRuntime?.getState().routing.bypass === true) {
+			return undefined;
+		}
 		const delivery = await this._assessAvoCanonicalDeliveryLocked(context, signal);
 		if (!delivery || !this._avoRuntime) return undefined;
 		const { state, gate, acceptedCandidate, assistantText, assistantDigest, deliveryMatches, completionError } =
@@ -11214,10 +11221,13 @@ export class AgentSession {
 				if (!visibleQueued && !isInternalPrompt && options?.skipPrePromptWork !== true && this._avoRuntime) {
 					this._avoRuntime.observeRootPrompt(normalized.text);
 					avoObservedRunId = this._avoRuntime.getState().runId;
-					this._ensureAvoCodingVerificationBaseline();
-					this._ensureAvoArtifactVerificationBaseline();
-					this._primeAvoProgressWatchdog();
-					await this._refreshAvoMemoryContext(normalized.text);
+					const avoState = this._avoRuntime.getState();
+					if (!avoState.routing.bypass) {
+						this._ensureAvoCodingVerificationBaseline();
+						this._ensureAvoArtifactVerificationBaseline();
+						this._primeAvoProgressWatchdog();
+						await this._refreshAvoMemoryContext(normalized.text);
+					}
 					this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 					this.agent.state.systemPrompt = this._baseSystemPrompt;
 				}
@@ -12283,10 +12293,13 @@ export class AgentSession {
 			observed = true;
 		}
 		if (!observed) return;
-		this._ensureAvoCodingVerificationBaseline();
-		this._ensureAvoArtifactVerificationBaseline();
-		this._primeAvoProgressWatchdog();
-		await this._refreshAvoMemoryContext(rootTurns.map((action) => action.payload.text).join("\n"));
+		const currentState = this._avoRuntime.getState();
+		if (!currentState.routing.bypass) {
+			this._ensureAvoCodingVerificationBaseline();
+			this._ensureAvoArtifactVerificationBaseline();
+			this._primeAvoProgressWatchdog();
+			await this._refreshAvoMemoryContext(rootTurns.map((action) => action.payload.text).join("\n"));
+		}
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 		this.agent.state.systemPrompt = this._baseSystemPrompt;
 	}

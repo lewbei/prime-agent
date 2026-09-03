@@ -143,6 +143,7 @@ export interface AvoRoutingDecision {
 	source: "host_auto" | "model" | "user";
 	reasons: string[];
 	decidedAt: string;
+	bypass?: boolean;
 }
 
 export interface AvoCandidate {
