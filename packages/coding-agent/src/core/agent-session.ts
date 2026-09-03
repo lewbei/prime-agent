@@ -5117,7 +5117,16 @@ export class AgentSession {
 			return;
 		}
 		this._avoToolNoProgressBatches += 1;
-		const threshold = this._avoToolInterventionCount === 0 ? 4 : this._avoToolLastInterventionBatch + 3;
+		const configuredThreshold = Number(process.env.AVO_TOOL_WATCHDOG_THRESHOLD);
+		const baseThreshold =
+			Number.isInteger(configuredThreshold) && configuredThreshold > 0
+				? configuredThreshold
+				: (state.routing?.horizon ?? state.horizonSelection) === "long"
+					? 12
+					: (state.routing?.horizon ?? state.horizonSelection) === "iterative"
+						? 8
+						: 6;
+		const threshold = this._avoToolInterventionCount === 0 ? baseThreshold : this._avoToolLastInterventionBatch + 3;
 		if (this._avoToolNoProgressBatches < threshold) return;
 		this._avoToolInterventionQueued = true;
 		this._avoToolInterventionCount += 1;
