@@ -261,15 +261,15 @@ export function classifyAvoHostEvaluationCommand(command: string): AvoHostComman
 	const patterns: Array<[AvoHostCommandEvaluator, RegExp]> = [
 		[
 			"test",
-			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?test\b|npx (?:(?:--yes|--no-install|-y) )?(?:vitest|jest)\b|(?:(?:uv run\s+)?python3?|uv run) (?:-m )?(?:pytest|unittest)\b|pytest\b|cargo test\b|go test\b|dotnet test\b|mvn test\b|gradle test\b|node --test\b)/,
+			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?test\b|(?:npx (?:(?:--yes|--no-install|-y) )?)?(?:vitest|jest)\b|(?:(?:uv run\s+)?python3?|uv run) (?:-m )?(?:pytest|unittest)\b|pytest\b|cargo test\b|go test\b|dotnet test\b|mvn test\b|gradle test\b|node --test\b)/,
 		],
 		[
 			"build",
-			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?build\b|(?:npx )?tsc\b|cargo build\b|go build\b|dotnet build\b|mvn package\b|gradle build\b|node --check\b)/,
+			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?build\b|(?:npx )?tsc\b|cargo build\b|go build\b|dotnet build\b|mvn package\b|gradle build\b|node --check\b|(?:(?:uv run\s+)?python3? -m )?mypy\b|mypy\b)/,
 		],
 		[
 			"lint",
-			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?(?:lint|check)\b|(?:npx )?(?:biome|eslint|prettier)\b|(?:python3? -m )?ruff\b|ruff\b)/,
+			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?(?:lint|check)\b|(?:npx )?(?:biome|eslint|prettier)\b|(?:(?:uv run\s+)?python3? -m )?ruff\b|(?:uv run\s+)?ruff\b|cargo clippy\b|golangci-lint\b)/,
 		],
 		[
 			"benchmark",
@@ -316,7 +316,10 @@ export function deriveAvoObservedTestIdentities(output: string): string[] {
 	const unittestIdentities = [
 		...normalized.matchAll(/^(\S+\s+\([^)]+\))\s+\.\.\.\s+(?:ok|FAIL|ERROR|skipped)\b/gm),
 	].map((match, index) => `unittest:${index + 1}:${match[1]!.trim()}`);
-	const identities = [...nodeIdentities, ...pytestIdentities, ...unittestIdentities];
+	const vitestIdentities = [...normalized.matchAll(/^\s*(?:✓|√|×|✕)\s+(.+?)(?:\s+\(?\d+(?:\.\d+)?\s*m?s\)?)?$/gm)].map(
+		(match, index) => `vitest:${index + 1}:${match[1]!.trim()}`,
+	);
+	const identities = [...nodeIdentities, ...pytestIdentities, ...unittestIdentities, ...vitestIdentities];
 	if (identities.length > 10_000 || identities.some((identity) => identity.length > 2_000)) return [];
 	return identities;
 }
