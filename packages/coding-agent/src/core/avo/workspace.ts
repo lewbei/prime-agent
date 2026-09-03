@@ -1151,7 +1151,7 @@ export function captureAvoVerificationHarnessManifest(
 
 	let controlBytes = 0;
 	const entries = [...controls.entries()]
-		.sort(([left], [right]) => left.localeCompare(right))
+		.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
 		.flatMap(([path, role]) => {
 			const entry = safeHarnessEntry(root, path, role);
 			if (!entry) {

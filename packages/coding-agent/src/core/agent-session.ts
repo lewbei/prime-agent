@@ -2592,7 +2592,29 @@ export class AgentSession {
 			(avoBoundaryState.delivery.phase === "accepted" || avoBoundaryState.delivery.phase === "pending")
 		) {
 			const completed = await this._completeAvoCanonicalDeliveryIfMatching(context);
-			if (completed) return true;
+			if (completed) {
+				try {
+					if (this._accountGoalUsageForAssistantMessage(context.message)) {
+						const message = createGoalContextMessage(this._goalState, "budget_limit");
+						const normalized = normalizeMessageContent(message.content);
+						await this._queuePreparedPrompt("steer", normalized.text, normalized.images, {
+							message,
+							resumeIfIdle: true,
+						});
+					}
+				} catch {
+					// Goal accounting must not interrupt the core agent loop.
+				}
+				if (this._serializedRefine) {
+					await this._agentEventQueue;
+					await this._runSerializedRefineCheckpoint();
+				}
+				const shouldContinueGoal =
+					this._goalState.status === "active" &&
+					Boolean(this._goalState.objective) &&
+					!this._stopGoalContinuationForTerminalMessage(context.message);
+				if (!shouldContinueGoal) return true;
+			}
 			const pendingDelivery = this._pendingAvoCanonicalDelivery();
 			if (pendingDelivery) {
 				const pendingBinding = parseAvoCanonicalDeliveryBinding(pendingDelivery);
@@ -9106,11 +9128,15 @@ export class AgentSession {
 		}
 		const avoContinuation = await this._getAvoCompletionContinuation(context, signal);
 		if (avoContinuation) return [avoContinuation];
-		// Canonical AVO delivery is terminal evidence. _getAvoCompletionContinuation()
-		// may have completed the run while handling this exact assistant message, so
-		// do not fall through and enqueue a generic autonomous continuation.
+		// Canonical AVO delivery is terminal evidence for the active task run, but
+		// an overarching thread goal must still be allowed to continue autonomously
+		// across task runs until completed or budget-limited.
 		if (this._enforceAvoCompletion && this._avoRuntime?.getState().status === "completed") {
-			return [];
+			const goalActive =
+				this._goalState.status === "active" &&
+				Boolean(this._goalState.objective) &&
+				!this._stopGoalContinuationForTerminalMessage(context.message);
+			if (!goalActive) return [];
 		}
 		if (this._pendingAvoCanonicalDelivery() || this._isAvoCanonicalDeliveryTerminalFailure()) return [];
 		const arrivalEpoch = this._sessionInputArrivalEpoch;
