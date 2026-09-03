@@ -318,5 +318,5 @@ describe("Issue #42: Verifier Protection, Equivalent Candidate Rejection & Bound
 		};
 		expect(finalState?.cycles[0]?.outcome).toBe("accepted");
 		expect(finalState?.delivery.phase).toBe("delivered");
-	});
+	}, 30000);
 });

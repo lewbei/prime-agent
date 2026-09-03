@@ -200,26 +200,30 @@ field is `metric_direction` (plain `direction` is invalid). `title`,
 `hypothesis`, and `design` are required.
 
 ```python
-experiment = await avo.record_experiment({
-    "experiment_id": "batch-size-screening",
-    "title": "Batch size screening",
-    "hypothesis": "Batch size 8 improves score.",
-    "design": "Screen batch size 8 against batch size 4 on three paired development seeds.",
-    "plan": {
-        "stage": "screening",
-        "mode": "prospective",
-        "candidate_ids": ["batch-size-4", "batch-size-8"],
-        "conditions": [{
-            "condition_id": "default",
-            "command_template": "python benchmark.py --seed {{seed}}",
-        }],
-        "seeds": [1, 2, 3],
-        "pairing": "paired",
-        "primary_metric": "score",
-        "metric_direction": "maximize",
-        "baseline_candidate_id": "batch-size-4",
-    },
-})
+experiment = await avo.record_experiment(
+    {
+        "experiment_id": "batch-size-screening",
+        "title": "Batch size screening",
+        "hypothesis": "Batch size 8 improves score.",
+        "design": "Screen batch size 8 against batch size 4 on three paired development seeds.",
+        "plan": {
+            "stage": "screening",
+            "mode": "prospective",
+            "candidate_ids": ["batch-size-4", "batch-size-8"],
+            "conditions": [
+                {
+                    "condition_id": "default",
+                    "command_template": "python benchmark.py --seed {{seed}}",
+                }
+            ],
+            "seeds": [1, 2, 3],
+            "pairing": "paired",
+            "primary_metric": "score",
+            "metric_direction": "maximize",
+            "baseline_candidate_id": "batch-size-4",
+        },
+    }
+)
 ```
 
 Screening is the default and may contain one or many challengers. For a paired
@@ -243,32 +247,36 @@ workspace identity digests from screening, including when confirmation happens
 in a later task.
 
 ```python
-confirmation = await avo.record_experiment({
-    "experiment_id": "batch-size-confirmation",
-    "title": "Confirm batch size 8",
-    "hypothesis": "Batch size 8 improves score by at least 5 points.",
-    "design": "Fresh paired confirmation on seeds 101-110.",
-    "plan": {
-        "stage": "confirmation",
-        "mode": "prospective",
-        "candidate_ids": ["batch-size-4", "batch-size-8"],
-        "conditions": [{
-            "condition_id": "default",
-            "command_template": "python benchmark.py --seed {{seed}}",
-        }],
-        "seeds": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
-        "pairing": "paired",
-        "primary_metric": "score",
-        "metric_direction": "maximize",
-        "baseline_candidate_id": "batch-size-4",
-        "confirmation_of_experiment_id": "batch-size-screening",
-        "promotion": {
-            "min_pairs": 10,
-            "min_effect": 5,
-            "min_relative_effect": 0.01,
+confirmation = await avo.record_experiment(
+    {
+        "experiment_id": "batch-size-confirmation",
+        "title": "Confirm batch size 8",
+        "hypothesis": "Batch size 8 improves score by at least 5 points.",
+        "design": "Fresh paired confirmation on seeds 101-110.",
+        "plan": {
+            "stage": "confirmation",
+            "mode": "prospective",
+            "candidate_ids": ["batch-size-4", "batch-size-8"],
+            "conditions": [
+                {
+                    "condition_id": "default",
+                    "command_template": "python benchmark.py --seed {{seed}}",
+                }
+            ],
+            "seeds": [101, 102, 103, 104, 105, 106, 107, 108, 109, 110],
+            "pairing": "paired",
+            "primary_metric": "score",
+            "metric_direction": "maximize",
+            "baseline_candidate_id": "batch-size-4",
+            "confirmation_of_experiment_id": "batch-size-screening",
+            "promotion": {
+                "min_pairs": 10,
+                "min_effect": 5,
+                "min_relative_effect": 0.01,
+            },
         },
-    },
-})
+    }
+)
 ```
 
 In coding tasks, restore each candidate's exact workspace state before calling
@@ -334,12 +342,14 @@ await avo.initialize(
 await avo.run_coding_baseline(
     "node --test tests/parser-race.test.cjs",
 )
-candidate = await avo.add_candidate({
-    "candidate_id": "patch-parser-lock",
-    "kind": "patch",
-    "summary": "Serialize parser cache mutation",
-    "payload": {"diff_sha256": "..."},
-})
+candidate = await avo.add_candidate(
+    {
+        "candidate_id": "patch-parser-lock",
+        "kind": "patch",
+        "summary": "Serialize parser cache mutation",
+        "payload": {"diff_sha256": "..."},
+    }
+)
 await avo.run_evaluation(
     candidate["candidate"]["candidateId"],
     "node --test tests/parser-race.test.cjs",

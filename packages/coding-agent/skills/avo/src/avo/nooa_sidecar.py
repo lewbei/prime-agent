@@ -11,11 +11,17 @@ from typing import Any
 
 from nooa_memory.config import EmbeddingConfig, MemoryConfig
 from nooa_memory.embeddings import get_embedder
-from nooa_memory.retrieval import RetrievalEngine
 from nooa_memory.reflection import ReflectionEngine
-from nooa_memory.schema import AccessRecord, Edge, EdgeType, Memory, MemoryRef, MemoryType
+from nooa_memory.retrieval import RetrievalEngine
+from nooa_memory.schema import (
+    AccessRecord,
+    Edge,
+    EdgeType,
+    Memory,
+    MemoryRef,
+    MemoryType,
+)
 from nooa_memory.store import MemoryStore
-
 
 OWNER = "prime-avo"
 
@@ -110,7 +116,9 @@ def _precision_score(memory: Memory, query_terms: set[str]) -> int:
     return 4 * title_overlap + 3 * tag_overlap + content_overlap
 
 
-def _high_precision_memories(memories: list[Memory], query: str, limit: int) -> list[Memory]:
+def _high_precision_memories(
+    memories: list[Memory], query: str, limit: int
+) -> list[Memory]:
     query_terms = _cue_terms(query)
     if not query_terms:
         return []
@@ -148,7 +156,9 @@ def _record(value: dict[str, Any]) -> Memory:
     parsed_created_at = None
     if isinstance(created_at, str):
         try:
-            parsed_created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00")).timestamp()
+            parsed_created_at = datetime.fromisoformat(
+                created_at.replace("Z", "+00:00")
+            ).timestamp()
         except ValueError:
             parsed_created_at = None
     references: list[MemoryRef] = []
@@ -197,12 +207,18 @@ def _record(value: dict[str, Any]) -> Memory:
         "content": str(value["content"]),
         "importance": float(value["importance"]),
         "tags": tags,
-        "source_task_ref": ",".join(str(source) for source in value.get("sourceIds", [])) or None,
-        "related_files": [str(reference) for reference in value.get("currentStateReferences", [])],
+        "source_task_ref": ",".join(
+            str(source) for source in value.get("sourceIds", [])
+        )
+        or None,
+        "related_files": [
+            str(reference) for reference in value.get("currentStateReferences", [])
+        ],
         "owner": str(value.get("owner", OWNER)),
         "references": references,
         "edges": edges,
-        "archived": bool(value.get("invalidatedAt")) or verification in {"contested", "invalidated"},
+        "archived": bool(value.get("invalidatedAt"))
+        or verification in {"contested", "invalidated"},
     }
     if parsed_created_at is not None:
         kwargs["created_at"] = parsed_created_at
@@ -219,7 +235,9 @@ def _sync_version(memory: Memory) -> str | None:
     )
 
 
-def _components(path: Path, payload: dict[str, Any]) -> tuple[MemoryStore, Any, MemoryConfig]:
+def _components(
+    path: Path, payload: dict[str, Any]
+) -> tuple[MemoryStore, Any, MemoryConfig]:
     embedding_payload = payload.get("embedding")
     embedding_values = embedding_payload if isinstance(embedding_payload, dict) else {}
     if embedding_values.get("dimensions") is not None:
@@ -290,11 +308,16 @@ def _upsert(
             and existing.archived
         ):
             record.archived = True
-        if not force_active and str(value.get("verificationState", "proposed")) != "verified":
+        if (
+            not force_active
+            and str(value.get("verificationState", "proposed")) != "verified"
+        ):
             record.archived = record.archived or existing.archived
     if force_active:
         record.archived = False
-    embedding_text = "\n".join([record.title or "", record.content, " ".join(record.tags)])
+    embedding_text = "\n".join(
+        [record.title or "", record.content, " ".join(record.tags)]
+    )
     store.add(record, embedder.embed(embedding_text))
 
 
@@ -342,19 +365,25 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                     if isinstance(memory_id, str) and memory_id not in memory_ids:
                         memory_ids.append(memory_id)
                 for ranking in result.get("rankings", []):
-                    if not isinstance(ranking, dict) or not isinstance(ranking.get("memory_id"), str):
+                    if not isinstance(ranking, dict) or not isinstance(
+                        ranking.get("memory_id"), str
+                    ):
                         continue
                     memory_id = ranking["memory_id"]
                     precision = ranking.get("precision_score")
                     importance = ranking.get("importance")
-                    if not isinstance(precision, int) or not isinstance(importance, (int, float)):
+                    if not isinstance(precision, int) or not isinstance(
+                        importance, (int, float)
+                    ):
                         continue
                     candidate_rank = (precision, float(importance), -recall_rank)
                     existing_rank = ranked_memories.get(memory_id)
                     if existing_rank is None or candidate_rank > existing_rank:
                         ranked_memories[memory_id] = candidate_rank
                     recall_rank += 1
-                results.append({"scope": item.get("scope"), "sync": sync, "recall": result})
+                results.append(
+                    {"scope": item.get("scope"), "sync": sync, "recall": result}
+                )
             elif command == "sync_reflect":
                 result = run(
                     "reflect",
@@ -376,17 +405,29 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(report, dict):
                     for key, value in report.items():
                         if isinstance(value, bool):
-                            aggregate_report[key] = bool(aggregate_report.get(key, False)) or value
+                            aggregate_report[key] = (
+                                bool(aggregate_report.get(key, False)) or value
+                            )
                         elif isinstance(value, (int, float)):
-                            aggregate_report[key] = float(aggregate_report.get(key, 0)) + value
+                            aggregate_report[key] = (
+                                float(aggregate_report.get(key, 0)) + value
+                            )
                         elif isinstance(value, str) and value:
                             aggregate_report[key] = value
-                results.append({"scope": item.get("scope"), "sync": sync, "reflection": result})
+                results.append(
+                    {"scope": item.get("scope"), "sync": sync, "reflection": result}
+                )
             else:
                 result = run("reconciliation_candidates", item_path, item)
                 for cluster in result.get("clusters", []):
                     if isinstance(cluster, dict):
-                        results.append({"scope": item.get("scope"), "sync": sync, "cluster": cluster})
+                        results.append(
+                            {
+                                "scope": item.get("scope"),
+                                "sync": sync,
+                                "cluster": cluster,
+                            }
+                        )
         if command == "sync_spontaneous":
             limit = payload.get("limit", 5)
             bounded_limit = limit if isinstance(limit, int) and limit > 0 else 5
@@ -484,9 +525,13 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(query, str) or not query.strip():
                 raise ValueError("spontaneous recall requires a non-empty query")
             if not isinstance(limit, int) or not 1 <= limit <= 20:
-                raise ValueError("spontaneous recall limit must be an integer from 1 to 20")
+                raise ValueError(
+                    "spontaneous recall limit must be an integer from 1 to 20"
+                )
             if not isinstance(max_chars, int) or not 256 <= max_chars <= 8000:
-                raise ValueError("spontaneous recall max_chars must be an integer from 256 to 8000")
+                raise ValueError(
+                    "spontaneous recall max_chars must be an integer from 256 to 8000"
+                )
             engine = RetrievalEngine(
                 store,
                 embedder,
@@ -495,7 +540,9 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
             )
             candidate_limit = min(50, max(limit * 4, limit))
             owner_scope = str(payload.get("owner_role", payload.get("owner", OWNER)))
-            candidates = engine.recall(query, k=candidate_limit, touch=False, owner=owner_scope)
+            candidates = engine.recall(
+                query, k=candidate_limit, touch=False, owner=owner_scope
+            )
             recalled = _high_precision_memories(candidates, query, limit)
             query_terms = _cue_terms(query)
             lines = ["## Recalled AVO memories (associative)"]
@@ -543,14 +590,20 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 memory.id: memory
                 for memory in store.all_memories(owner=owner_scope)
                 if not memory.archived
-                and memory.type in {MemoryType.INFO, MemoryType.SKILL, MemoryType.REFLECTION}
+                and memory.type
+                in {MemoryType.INFO, MemoryType.SKILL, MemoryType.REFLECTION}
                 and "verification:contested" not in memory.tags
                 and "verification:invalidated" not in memory.tags
             }
             visited: set[str] = set()
             clusters: list[dict[str, Any]] = []
-            for memory in sorted(eligible.values(), key=lambda item: (item.created_at, item.id)):
-                if memory.id in visited or len(clusters) >= config.reflection.max_clusters_per_reflection:
+            for memory in sorted(
+                eligible.values(), key=lambda item: (item.created_at, item.id)
+            ):
+                if (
+                    memory.id in visited
+                    or len(clusters) >= config.reflection.max_clusters_per_reflection
+                ):
                     continue
                 embedding = store.get_embedding(memory.id)
                 if embedding is None:
@@ -604,7 +657,9 @@ def run(command: str, path: Path, payload: dict[str, Any]) -> dict[str, Any]:
                 canonical = canonical_memories.get(memory_id)
                 if canonical is not None:
                     _upsert(store, embedder, canonical, force_active=True)
-            store.log_maintenance("reflect", {"trigger": payload.get("trigger", "manual"), **report_data})
+            store.log_maintenance(
+                "reflect", {"trigger": payload.get("trigger", "manual"), **report_data}
+            )
             archived = [
                 memory.id
                 for memory in store.all_memories(include_archived=True, owner=None)
@@ -635,22 +690,22 @@ def main() -> None:
             try:
                 request = json.loads(line)
                 if not isinstance(request, dict):
-                    raise ValueError("serve request must be a JSON object")
+                    raise TypeError("serve request must be a JSON object")
                 command = request.get("command")
                 path = request.get("path")
                 payload = request.get("payload")
                 if not isinstance(command, str) or not isinstance(path, str):
-                    raise ValueError("serve request requires string command and path")
+                    raise TypeError("serve request requires string command and path")
                 if not isinstance(payload, dict):
-                    raise ValueError("serve request payload must be an object")
+                    raise TypeError("serve request payload must be an object")
                 response = run(command, Path(path), payload)
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001
                 response = {"ok": False, "reason": str(error)}
             print(json.dumps(response), flush=True)
         return
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict):
-        raise ValueError("sidecar input must be a JSON object")
+        raise TypeError("sidecar input must be a JSON object")
     print(json.dumps(run(sys.argv[1], Path(sys.argv[2]), payload)))
 
 

@@ -1,10 +1,25 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { parseArgs } from "../src/cli/args.js";
+import {
+	AVO_VERIFICATION_BROKER_SOCKET_ENV,
+	AVO_VERIFICATION_BROKER_TOKEN_ENV,
+	createAvoVerificationBrokerBashOperations,
+	startAvoVerificationBroker,
+} from "../src/core/avo/verification-broker.js";
 import {
 	aggregateSpecBenchConditions,
 	buildSpecBenchAgentArgs,
@@ -23,6 +38,7 @@ import {
 	parseSpecBenchJUnitXml,
 	prepareSpecBenchConfig,
 	primeImplementationProvenance,
+	SPECBENCH_LEVEL_1_DEFAULT_MAX_TOKENS,
 	type SpecBenchResult,
 	specBenchAgentEnvironment,
 	specBenchAgentInfrastructureErrorFromSessionJsonl,
@@ -34,6 +50,7 @@ import {
 	specBenchHostFixtures,
 	specBenchInfrastructureError,
 	specBenchLockedStarterPaths,
+	specBenchNativeToolchainEnvironment,
 	specBenchNetworkPolicyViolations,
 	specBenchNetworkToolPolicyViolations,
 	specBenchRemainingGradeTimeoutMs,
@@ -62,8 +79,44 @@ describe("SpecBench evaluation runner", () => {
 		expect(source).toContain('"-vv"');
 		expect(source).toContain('TASK_ID = "c_compiler"');
 		expect(source).toContain("executed zero non-skipped tests");
+		expect(source).toContain(
+			'print(f"SPECBENCH_PUBLIC_SUMMARY tests={tests} failures={failures} errors={errors} skipped={len(skipped)} returncode={result.returncode}")',
+		);
+		expect(source.indexOf("print(result.stdout)")).toBeLessThan(
+			source.indexOf("assert failures == 0 and errors == 0"),
+		);
+		expect(source).toContain('print("SPECBENCH_PUBLIC_DIAGNOSTIC_BEGIN")');
+		expect(source).toContain('print("SPECBENCH_PUBLIC_DIAGNOSTIC_END")');
 		expect(source).toContain("assert starter_changed");
 		expect(source).not.toContain("if unchanged:");
+	});
+
+	test("retains host-observed public-suite diagnostics when the visible contract fails", () => {
+		const grader = ensureSpecBenchGraderPython();
+		const workspace = mkdtempSync(join(tmpdir(), "prime-specbench-contract-diagnostics-"));
+		try {
+			const publicRoot = join(workspace, ".specbench-visible", "tests", "public");
+			mkdirSync(publicRoot, { recursive: true });
+			writeFileSync(join(workspace, "subject.py"), "VALUE = 2\n");
+			writeFileSync(join(publicRoot, "test_public.py"), "import missing_visible_dependency\n");
+			writeFileSync(
+				join(workspace, "test_specbench_contract.py"),
+				buildSpecBenchBaselineTestSource({ "subject.py": "VALUE = 1\n" }, 30, grader.path, "diagnostic"),
+			);
+			const result = spawnSync(grader.path, ["-m", "pytest", "-q", "test_specbench_contract.py"], {
+				cwd: workspace,
+				encoding: "utf8",
+				env: specBenchGradeEnvironment(process.env, workspace, grader.path),
+				timeout: 60_000,
+			});
+			expect(result.status).toBe(1);
+			expect(result.stdout).toContain("SPECBENCH_PUBLIC_SUMMARY tests=1 failures=0 errors=1 skipped=0 returncode=2");
+			expect(result.stdout).toContain("SPECBENCH_PUBLIC_DIAGNOSTIC_BEGIN");
+			expect(result.stdout).toContain("SPECBENCH_PUBLIC_DIAGNOSTIC_END");
+			expect(result.stdout).toContain("ModuleNotFoundError: No module named 'missing_visible_dependency'");
+		} finally {
+			rmSync(workspace, { recursive: true, force: true });
+		}
 	});
 
 	test("preserves the public test package layout without staging hidden suites or reference source", () => {
@@ -174,12 +227,23 @@ describe("SpecBench evaluation runner", () => {
 			"json_parser,http_server",
 			"--max-turns",
 			"18",
+			"--max-tokens",
+			"240000",
 			"--hardening",
 			"on",
 		]);
 		expect(parsed.tasks).toEqual(["json_parser", "http_server"]);
 		expect(parsed.maxTurns).toBe(18);
+		expect(parsed.maxTokens).toBe(240_000);
 		expect(parsed.hardening).toBe(true);
+	});
+
+	test("uses an explicit reproducible Level-1 autonomous token budget by default", () => {
+		expect(parseSpecBenchArgs(["--task", "json_parser"]).maxTokens).toBe(SPECBENCH_LEVEL_1_DEFAULT_MAX_TOKENS);
+		expect(SPECBENCH_LEVEL_1_DEFAULT_MAX_TOKENS).toBe(200_000);
+		expect(() => parseSpecBenchArgs(["--task", "json_parser", "--max-tokens", "0"])).toThrow(
+			/--max-tokens requires a positive integer/,
+		);
 	});
 
 	test("parses a repeated one-feature-at-a-time ablation matrix", () => {
@@ -202,6 +266,7 @@ describe("SpecBench evaluation runner", () => {
 			workspace: "/tmp/specbench/workspace",
 			sessionDir: "/tmp/specbench/sessions",
 			maxTurns: 30,
+			maxTokens: 200_000,
 			timeoutMs: 60_000,
 			provider: "google-vertex",
 			model: "gemini-3.7-flash",
@@ -221,6 +286,7 @@ describe("SpecBench evaluation runner", () => {
 			model: "gemini-3.7-flash",
 			autonomous: true,
 			autonomousMaxTurns: 30,
+			autonomousMaxTokens: 200_000,
 		});
 		expect(parsed.messages).toEqual(["Implement TASK.md"]);
 	});
@@ -381,15 +447,118 @@ def get_task(): return Task()
 		});
 
 		expect(environment).toMatchObject({
-			PATH: "/bin",
 			GOOGLE_VERTEX_GOOGLE_SEARCH: "0",
 			GOLLUM_USE_DOCKER: "0",
 			OS_KERNEL_USE_DOCKER: "0",
+			UV_OFFLINE: "1",
 		});
+		expect(environment.PATH?.split(delimiter).at(-1)).toBe("/bin");
 		expect(environment.SERPER_API_KEY).toBeUndefined();
 		expect(environment.TAVILY_API_KEY).toBeUndefined();
 		expect(environment.GITHUB_PAT_TOKEN).toBeUndefined();
 	});
+
+	test("composes the cached native Level-1 toolchains ahead of the inherited environment", () => {
+		const toolchainRoot = mkdtempSync(join(tmpdir(), "prime-specbench-toolchains-"));
+		try {
+			const nativeBin = join(toolchainRoot, "native-extra-v1", "usr", "bin");
+			const goRoot = join(toolchainRoot, "v1", "go");
+			const goBin = join(goRoot, "bin");
+			const riscVBin = join(toolchainRoot, "v1", "riscv", "usr", "bin");
+			const nativeLib = join(toolchainRoot, "native-extra-v1", "usr", "lib", "x86_64-linux-gnu");
+			const llvmLib = join(toolchainRoot, "native-extra-v1", "usr", "lib", "llvm-21", "lib");
+			const riscVLib = join(toolchainRoot, "v1", "riscv", "lib");
+			for (const path of [nativeBin, goBin, riscVBin, nativeLib, llvmLib, riscVLib]) {
+				mkdirSync(path, { recursive: true });
+			}
+			writeFileSync(join(goBin, "go"), "fixture", "utf8");
+
+			const environment = specBenchNativeToolchainEnvironment(
+				{ PATH: "/system/bin", LD_LIBRARY_PATH: "/system/lib" },
+				toolchainRoot,
+			);
+			expect(environment.PATH?.split(delimiter)).toEqual([nativeBin, goBin, riscVBin, "/system/bin"]);
+			expect(environment.GOROOT).toBe(goRoot);
+			expect(environment.LD_LIBRARY_PATH?.split(delimiter)).toEqual([nativeLib, llvmLib, riscVLib, "/system/lib"]);
+		} finally {
+			rmSync(toolchainRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("runs the mandatory python3 pytest command in hardened agent and broker sandboxes", async () => {
+		const grader = ensureSpecBenchGraderPython();
+		const root = mkdtempSync(join(tmpdir(), "prime-specbench-python-sandboxes-"));
+		const outputRoot = join(root, "output");
+		const runRoot = join(outputRoot, "current");
+		const workspace = join(runRoot, "workspace");
+		const runtimeRoot = join(runRoot, "runtime");
+		const specbenchRoot = join(root, "official-specbench");
+		const configRoot = join(root, "config");
+		for (const path of [workspace, runtimeRoot, specbenchRoot, configRoot]) mkdirSync(path, { recursive: true });
+		const contractPath = join(workspace, "test_specbench_contract.py");
+		writeFileSync(contractPath, "def test_specbench_contract():\n    assert True\n");
+		const command = "python3 -m pytest -vv test_specbench_contract.py";
+		const agentEnvironment = specBenchAgentEnvironment(process.env, grader.path);
+		const sandbox = buildSpecBenchSandboxArgs(
+			"/bin/sh",
+			["-c", command],
+			runRoot,
+			outputRoot,
+			workspace,
+			specbenchRoot,
+			configRoot,
+			[contractPath],
+		);
+		const agentResult = spawnSync(sandbox[0]!, sandbox.slice(1), {
+			cwd: workspace,
+			encoding: "utf8",
+			env: agentEnvironment,
+			timeout: 60_000,
+		});
+
+		let broker: Awaited<ReturnType<typeof startAvoVerificationBroker>> | undefined;
+		const previousSocket = process.env[AVO_VERIFICATION_BROKER_SOCKET_ENV];
+		const previousToken = process.env[AVO_VERIFICATION_BROKER_TOKEN_ENV];
+		try {
+			expect(agentResult.status, `${agentResult.stdout}\n${agentResult.stderr}`).toBe(0);
+			expect(agentResult.stdout).toContain("1 passed");
+
+			const graderRoot = dirname(dirname(grader.path));
+			const interpreterRoot = dirname(dirname(dirname(realpathSync(grader.path))));
+			broker = await startAvoVerificationBroker({
+				workspace,
+				allowedCommand: command,
+				controlPaths: ["test_specbench_contract.py"],
+				environment: specBenchGradeEnvironment(process.env, workspace, grader.path),
+				privateHome: true,
+				visiblePaths: [graderRoot, interpreterRoot].filter(
+					(path, index, paths) =>
+						path.startsWith(`${homedir()}/`) && existsSync(path) && paths.indexOf(path) === index,
+				),
+				defaultTimeoutMs: 60_000,
+				maximumTimeoutMs: 60_000,
+				pythonSemanticAuthority: true,
+			});
+			process.env[AVO_VERIFICATION_BROKER_SOCKET_ENV] = broker.socketPath;
+			process.env[AVO_VERIFICATION_BROKER_TOKEN_ENV] = broker.token;
+			const operations = createAvoVerificationBrokerBashOperations();
+			expect(operations).toBeDefined();
+			const chunks: Buffer[] = [];
+			const brokerResult = await operations!.exec(command, workspace, {
+				onData: (chunk) => chunks.push(chunk),
+				timeout: 60,
+			});
+			expect(brokerResult.exitCode, Buffer.concat(chunks).toString("utf8")).toBe(0);
+			expect(Buffer.concat(chunks).toString("utf8")).toContain("1 passed");
+		} finally {
+			if (previousSocket === undefined) delete process.env[AVO_VERIFICATION_BROKER_SOCKET_ENV];
+			else process.env[AVO_VERIFICATION_BROKER_SOCKET_ENV] = previousSocket;
+			if (previousToken === undefined) delete process.env[AVO_VERIFICATION_BROKER_TOKEN_ENV];
+			else process.env[AVO_VERIFICATION_BROKER_TOKEN_ENV] = previousToken;
+			await broker?.close();
+			rmSync(root, { recursive: true, force: true });
+		}
+	}, 120_000);
 
 	test("flags model-authored network and package-fetch commands without flagging local verification", () => {
 		expect(
@@ -575,12 +744,12 @@ def get_task(): return Task()
 		);
 
 		expect(environment).toMatchObject({
-			PATH: "/bin",
 			PYTHONPATH: "/isolated/workspace",
 			PYTHONDONTWRITEBYTECODE: "1",
 			GOLLUM_USE_DOCKER: "0",
 			OS_KERNEL_USE_DOCKER: "0",
 		});
+		expect(environment.PATH?.split(delimiter).at(-1)).toBe("/bin");
 		expect(environment.GOOGLE_APPLICATION_CREDENTIALS).toBeUndefined();
 		expect(environment.VERTEX_API_KEY).toBeUndefined();
 		expect(environment.AWS_ACCESS_KEY_ID).toBeUndefined();
@@ -609,6 +778,11 @@ def get_task(): return Task()
 		expect(mountIndex("--bind", "/output/current/workspace")).toBeGreaterThan(mountIndex("--tmpfs", "/output"));
 		expect(mountIndex("--bind", "/output/current/runtime")).toBeGreaterThan(mountIndex("--tmpfs", "/output"));
 		expect(mountIndex("--bind", "/output/current")).toBe(-1);
+		const uvCache = join(homedir(), ".cache", "uv");
+		if (existsSync(uvCache)) {
+			expect(mountIndex("--overlay-src", uvCache)).toBeGreaterThan(-1);
+			expect(mountIndex("--tmp-overlay", uvCache)).toBeGreaterThan(mountIndex("--overlay-src", uvCache));
+		}
 	});
 
 	test("masks runtime sockets but rebinds only the two authenticated broker sockets", () => {
@@ -1073,6 +1247,7 @@ def test_isolation():
 				orderIndex: 1,
 				experimentSeed: "test",
 				runConfigurationDigest: "b".repeat(64),
+				maxTokens: 200_000,
 				primeRevision: "c".repeat(40),
 				primeWorkspaceDigest: "d".repeat(64),
 				agentExecutableDigest: "a".repeat(64),
@@ -1263,6 +1438,15 @@ def test_isolation():
 							costUsd: 0,
 						},
 						memory: {
+							modelCalls: 0,
+							inputTokens: 0,
+							cacheReadTokens: 0,
+							cacheWriteTokens: 0,
+							outputTokens: 0,
+							totalTokens: 0,
+							costUsd: 0,
+						},
+						child_memory: {
 							modelCalls: 0,
 							inputTokens: 0,
 							cacheReadTokens: 0,

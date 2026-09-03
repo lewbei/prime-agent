@@ -111,7 +111,9 @@ async def initialize(
 
 async def configure(*, horizon: str) -> dict[str, Any]:
     if horizon not in {"iterative", "long"}:
-        raise ValueError("model-facing configure may only escalate horizon to iterative or long")
+        raise ValueError(
+            "model-facing configure may only escalate horizon to iterative or long"
+        )
     return await host_request("avo.configure", {"horizon": horizon})
 
 
@@ -120,7 +122,9 @@ async def get_state() -> dict[str, Any]:
 
 
 async def add_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    return await host_request("avo.candidate.add", {"candidate": _object(candidate, "candidate")})
+    return await host_request(
+        "avo.candidate.add", {"candidate": _object(candidate, "candidate")}
+    )
 
 
 async def register_obligations(obligations: list[dict[str, Any]]) -> dict[str, Any]:
@@ -147,12 +151,16 @@ async def cover_obligations(
     """Bind explicit candidate obligations to host receipts in one idempotent call."""
     if not isinstance(candidate_id, str) or not candidate_id.strip():
         raise ValueError("candidate_id must be a non-empty string")
-    if not isinstance(evaluation_ids, list) or not evaluation_ids or not all(
-        isinstance(value, str) and value.strip() for value in evaluation_ids
+    if (
+        not isinstance(evaluation_ids, list)
+        or not evaluation_ids
+        or not all(isinstance(value, str) and value.strip() for value in evaluation_ids)
     ):
         raise ValueError("evaluation_ids must be a non-empty list of strings")
-    if not isinstance(obligation_ids, list) or not obligation_ids or not all(
-        isinstance(value, str) and value.strip() for value in obligation_ids
+    if (
+        not isinstance(obligation_ids, list)
+        or not obligation_ids
+        or not all(isinstance(value, str) and value.strip() for value in obligation_ids)
     ):
         raise ValueError("obligation_ids must be a non-empty list of strings")
     if len(obligation_ids) > 64:
@@ -180,7 +188,9 @@ async def cover_obligations(
     return {"covered": covered, "skipped_obligation_ids": skipped}
 
 
-async def register_critical_assumptions(assumptions: list[dict[str, Any]]) -> dict[str, Any]:
+async def register_critical_assumptions(
+    assumptions: list[dict[str, Any]],
+) -> dict[str, Any]:
     if not isinstance(assumptions, list) or not assumptions:
         raise ValueError("assumptions must be a non-empty list")
     return await host_request(
@@ -238,7 +248,7 @@ async def run_trial(
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{label} must be a non-empty string")
     if isinstance(seed, bool) or not isinstance(seed, (str, int)):
-        raise ValueError("seed must be a non-empty string or integer")
+        raise TypeError("seed must be a non-empty string or integer")
     seed_value = str(seed)
     if not seed_value.strip():
         raise ValueError("seed must be a non-empty string or integer")
@@ -369,7 +379,9 @@ async def complete_cycle(
     timeout: float = 45,
     poll_interval: float = 2,
 ) -> dict[str, Any]:
-    response = await host_request("avo.cycle.complete", {"cycle": _object(cycle, "cycle")})
+    response = await host_request(
+        "avo.cycle.complete", {"cycle": _object(cycle, "cycle")}
+    )
     cycle_result = response.get("cycle")
     cycle_id = cycle_result.get("cycleId") if isinstance(cycle_result, dict) else None
     supervisor = response.get("supervisor")
@@ -432,7 +444,9 @@ def nooa_backend_status() -> dict[str, Any]:
 
 
 async def remember(memory: dict[str, Any]) -> dict[str, Any]:
-    return await host_request("avo.memory.remember", {"memory": _object(memory, "memory")})
+    return await host_request(
+        "avo.memory.remember", {"memory": _object(memory, "memory")}
+    )
 
 
 async def sync_nooa_memory() -> dict[str, Any]:
@@ -443,14 +457,18 @@ async def recall(query: str, *, limit: int = 8) -> dict[str, Any]:
     return await host_request("avo.memory.recall", {"query": query, "limit": limit})
 
 
-async def spontaneous_recall(query: str, *, limit: int = 5, max_chars: int = 2000) -> dict[str, Any]:
+async def spontaneous_recall(
+    query: str, *, limit: int = 5, max_chars: int = 2000
+) -> dict[str, Any]:
     return await host_request(
         "avo.memory.spontaneous",
         {"query": query, "limit": limit, "max_chars": max_chars},
     )
 
 
-async def reflect_memory(trigger: str = "manual", *, cycle_id: str | None = None) -> dict[str, Any]:
+async def reflect_memory(
+    trigger: str = "manual", *, cycle_id: str | None = None
+) -> dict[str, Any]:
     allowed = {
         "five_cycles",
         "supervisor_intervention",
@@ -487,7 +505,9 @@ async def list_lineage() -> dict[str, Any]:
     return await host_request("avo.lineage.list", {})
 
 
-async def sample_lineage(solution_id: str, *, reason: str | None = None) -> dict[str, Any]:
+async def sample_lineage(
+    solution_id: str, *, reason: str | None = None
+) -> dict[str, Any]:
     """Deliberately sample a specific committed solution from lineage P_t with trace attribution."""
     payload: dict[str, Any] = {"solutionId": _string(solution_id, "solution_id")}
     if reason is not None:
@@ -500,7 +520,9 @@ async def list_knowledge() -> dict[str, Any]:
     return await host_request("avo.knowledge.list", {})
 
 
-async def sample_knowledge(knowledge_id: str, *, reason: str | None = None) -> dict[str, Any]:
+async def sample_knowledge(
+    knowledge_id: str, *, reason: str | None = None
+) -> dict[str, Any]:
     """Deliberately sample a domain knowledge entry from K with trace attribution."""
     payload: dict[str, Any] = {"knowledgeId": _string(knowledge_id, "knowledge_id")}
     if reason is not None:
@@ -534,9 +556,9 @@ __all__ = [
     "complete",
     "complete_cycle",
     "complete_experiment",
-	"cover_obligation",
-	"cover_obligations",
     "configure",
+    "cover_obligation",
+    "cover_obligations",
     "execution_contract",
     "fetch_external_source",
     "get_scoring_manifest",
@@ -549,15 +571,15 @@ __all__ = [
     "record_evaluation",
     "record_experiment",
     "record_trial",
-	"register_critical_assumptions",
-	"register_obligations",
     "reflect_memory",
+    "register_critical_assumptions",
+    "register_obligations",
     "remember",
+    "resolve_critical_assumption",
     "run_coding_baseline",
     "run_evaluation",
     "run_trial",
     "run_variation",
-	"resolve_critical_assumption",
     "sample_knowledge",
     "sample_lineage",
     "score_candidate",

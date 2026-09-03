@@ -253,6 +253,15 @@ describe("Prime Integrity Eval", () => {
 						totalTokens: 0,
 						costUsd: 0,
 					},
+					child_memory: {
+						modelCalls: 0,
+						inputTokens: 0,
+						cacheReadTokens: 0,
+						cacheWriteTokens: 0,
+						outputTokens: 0,
+						totalTokens: 0,
+						costUsd: 0,
+					},
 					other: {
 						modelCalls: 0,
 						inputTokens: 0,
@@ -415,14 +424,115 @@ describe("Prime Integrity Eval", () => {
 			),
 		).toEqual({
 			setup: 10,
-			implementation: 20,
+			implementation: 70,
 			candidate_evaluation: 30,
 			obligation_coverage: 60,
 			completion: 40,
-			completion_repair: 50,
+			completion_repair: 0,
 			post_ready_work: 0,
 			memory: 70,
+			child_memory: 0,
 			other: 80,
+		});
+	});
+
+	test("does not infer a completed stop-gate attempt from an unresolved tool call", () => {
+		const root = tempDirectory();
+		const sessionPath = join(root, "session.jsonl");
+		writeFileSync(
+			sessionPath,
+			[
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "unresolved-gate",
+								name: "ipython",
+								arguments: { code: "await avo.stop_gate()" },
+							},
+						],
+						usage: { input: 9, output: 1, totalTokens: 10, cost: { total: 0.01 } },
+					},
+				},
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", name: "ipython", arguments: { code: "continue_implementation()" } }],
+						usage: { input: 19, output: 1, totalTokens: 20, cost: { total: 0.02 } },
+					},
+				},
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+			"utf8",
+		);
+
+		const trace = summarizePrimeIntegrityTrace([sessionPath], root);
+		expect(trace.completionAttemptCount).toBe(0);
+		expect(trace.tokenUsageByStage.completion.totalTokens).toBe(10);
+		expect(trace.tokenUsageByStage.implementation.totalTokens).toBe(20);
+		expect(trace.tokenUsageByStage.completion_repair.totalTokens).toBe(0);
+	});
+
+	test("attributes retained NOOA child sessions to child-memory usage and cost", () => {
+		const root = tempDirectory();
+		const rootSessionPath = join(root, "root.jsonl");
+		const childSessionPath = join(root, "child.jsonl");
+		writeFileSync(
+			rootSessionPath,
+			`${JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", name: "ipython", arguments: { code: "implement()" } }],
+					usage: { input: 7, output: 3, totalTokens: 10, cost: { total: 0.01 } },
+				},
+			})}\n`,
+			"utf8",
+		);
+		writeFileSync(
+			childSessionPath,
+			[
+				{ type: "session", id: "child", rlmDepth: 1 },
+				{
+					type: "custom_message",
+					content: "You are an isolated NOOA-compatible episode-to-reflection reasoner.",
+				},
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "reflection" }],
+						usage: {
+							input: 40,
+							cacheRead: 5,
+							cacheWrite: 2,
+							output: 10,
+							totalTokens: 57,
+							cost: { total: 0.25 },
+						},
+					},
+				},
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+			"utf8",
+		);
+
+		const trace = summarizePrimeIntegrityTrace([rootSessionPath, childSessionPath], root);
+		expect(trace).toMatchObject({ modelCalls: 2, totalTokens: 67, costUsd: 0.26 });
+		expect(trace.tokenUsageByStage.child_memory).toEqual({
+			modelCalls: 1,
+			inputTokens: 40,
+			cacheReadTokens: 5,
+			cacheWriteTokens: 2,
+			outputTokens: 10,
+			totalTokens: 57,
+			costUsd: 0.25,
 		});
 	});
 
@@ -570,6 +680,68 @@ describe("Prime Integrity Eval", () => {
 		});
 	});
 
+	test("records durable canonical delivery as a successful completion after an earlier blocked gate", () => {
+		const root = tempDirectory();
+		const avoDirectory = join(root, "session", "avo");
+		const sessionPath = join(root, "session.jsonl");
+		mkdirSync(avoDirectory, { recursive: true });
+		writeFileSync(
+			sessionPath,
+			[
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "blocked-gate",
+								name: "ipython",
+								arguments: { code: "await avo.stop_gate()" },
+							},
+						],
+						usage: { input: 9, output: 1, totalTokens: 10 },
+					},
+				}),
+				JSON.stringify({
+					type: "message",
+					message: {
+						role: "toolResult",
+						toolCallId: "blocked-gate",
+						content: [
+							{
+								type: "text",
+								text: "{'stop_gate': {'passed': False, 'checks': [{'id': 'supervisor', 'passed': False}], 'reasons': ['review pending']}}",
+							},
+						],
+					},
+				}),
+				JSON.stringify({
+					type: "custom_message",
+					customType: "avo_canonical_delivery_required",
+					timestamp: "2026-08-31T00:00:00.000Z",
+					details: { gatePassed: true },
+				}),
+			].join("\n"),
+			"utf8",
+		);
+		writeFileSync(join(avoDirectory, "state.json"), JSON.stringify({ status: "completed" }), "utf8");
+
+		const trace = summarizePrimeIntegrityTrace([sessionPath], root);
+		expect(trace).toMatchObject({
+			completedRuns: 1,
+			completionAttemptCount: 2,
+			failedCompletionAttemptCount: 1,
+			successfulCompletionAttemptCount: 1,
+			firstCompletionAttemptPassed: false,
+		});
+		expect(trace.completionAttempts[1]).toMatchObject({
+			source: "host_completion",
+			passed: true,
+			blockerIds: [],
+		});
+	});
+
 	test("reads anti-laziness checkpoints from the durable AVO trace", () => {
 		const root = tempDirectory();
 		const avoDirectory = join(root, "session", "avo");
@@ -581,7 +753,7 @@ describe("Prime Integrity Eval", () => {
 				JSON.stringify({
 					type: "custom_message",
 					customType: "avo_progress_intervention",
-					details: { escalationLevel: 4 },
+					details: { escalationLevel: 1 },
 				}),
 				JSON.stringify({
 					type: "message",
@@ -591,7 +763,7 @@ describe("Prime Integrity Eval", () => {
 						content: [
 							{
 								type: "text",
-								text: "AVO host tool probation blocked another non-milestone IPython call",
+								text: "AVO host tool probation blocked a non-milestone IPython call",
 							},
 						],
 					},
@@ -648,7 +820,7 @@ describe("Prime Integrity Eval", () => {
 					{ status: "watch", triggeredHeuristics: ["no_observable_progress_1_tool_batch"] },
 					{
 						status: "intervene",
-						reason: "Anti-laziness escalation 4: probation active",
+						reason: "Anti-laziness tool intervention: probation active",
 						triggeredHeuristics: ["anti_laziness_intervention"],
 					},
 					{ status: "progressing", triggeredHeuristics: ["observable_progress_resumed"] },
@@ -682,6 +854,37 @@ describe("Prime Integrity Eval", () => {
 			watchdogWatches: 1,
 			toolProbationActivations: 1,
 			toolProbationBlockedCalls: 1,
+		});
+	});
+
+	test("reports final cycle outcomes after retained-supervisor vetoes and supersession", () => {
+		const root = tempDirectory();
+		const avoDirectory = join(root, "session", "avo");
+		mkdirSync(avoDirectory, { recursive: true });
+		writeFileSync(
+			join(avoDirectory, "state.json"),
+			JSON.stringify({
+				cycles: [
+					{ cycleId: "vetoed", outcome: "accepted" },
+					{ cycleId: "pending", outcome: "accepted" },
+					{ cycleId: "cleared", outcome: "accepted" },
+					{ cycleId: "raw-revision", outcome: "revised" },
+				],
+				supervision: [
+					{ cycleId: "vetoed", source: "retained_supervisor", status: "progressing" },
+					{ cycleId: "vetoed", source: "retained_supervisor", status: "intervene" },
+					{ cycleId: "pending", source: "retained_supervisor", status: "watch" },
+					{ cycleId: "cleared", source: "retained_supervisor", status: "intervene" },
+					{ cycleId: "cleared", source: "retained_supervisor", status: "progressing" },
+				],
+			}),
+			"utf8",
+		);
+
+		expect(summarizePrimeIntegrityTrace([], root)).toMatchObject({
+			cycles: 4,
+			acceptedCycles: 1,
+			revisedCycles: 2,
 		});
 	});
 });

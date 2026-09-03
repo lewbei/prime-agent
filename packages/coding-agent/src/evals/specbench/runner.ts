@@ -18,7 +18,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AVO_INTERNAL_ABLATIONS_ENV, type AvoAblationFeature } from "../../core/avo/ablation.js";
@@ -155,6 +155,10 @@ const C_COMPILER_PRIVATE_SKIP_NODE_IDS = new Set([
 ]);
 const DEFAULT_DISK_WATCHDOG_MINIMUM_BYTES = 5 * 1024 * 1024 * 1024;
 const DEFAULT_DISK_WATCHDOG_MAXIMUM_CASE_BYTES = 500 * 1024 * 1024;
+// Level-1 tasks are tool-heavy and may need several large cache-miss reasoning
+// responses. The runtime enforces this between responses, so one already-started
+// response may take observed usage beyond this configured budget.
+export const SPECBENCH_LEVEL_1_DEFAULT_MAX_TOKENS = 200_000;
 const BENCHMARK_SECRET_ENVIRONMENT = [
 	"GITHUB_TOKEN",
 	"GITHUB_PAT_TOKEN",
@@ -220,6 +224,7 @@ interface SpecBenchAblationCondition {
 
 export interface SpecBenchRunProvenance {
 	runConfigurationDigest: string;
+	maxTokens: number;
 	uvCacheRoot: string;
 	primeRevision: string;
 	primeWorkspaceDigest: string;
@@ -248,6 +253,7 @@ export interface SpecBenchOptions {
 	specbenchRoot: string;
 	outputDir: string;
 	maxTurns: number;
+	maxTokens: number;
 	timeoutMs: number;
 	hardening: boolean;
 	list: boolean;
@@ -359,6 +365,7 @@ export interface SpecBenchResult {
 	orderIndex: number;
 	experimentSeed: string;
 	runConfigurationDigest: string;
+	maxTokens: number;
 	primeRevision: string;
 	primeWorkspaceDigest: string;
 	agentExecutableDigest: string;
@@ -836,12 +843,13 @@ export function specBenchToolchainProvenance(
 	| "toolchainManifestVerified"
 	| "uvCacheRoot"
 > {
-	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
+	const nativeEnvironment = specBenchNativeToolchainEnvironment(environment);
+	const uvCacheRoot = resolveSpecBenchUvCacheRoot(nativeEnvironment);
 	const toolchainEnvironment = {
-		PATH: environment.PATH ?? null,
-		GOROOT: environment.GOROOT ?? null,
-		COMPILER_PATH: environment.COMPILER_PATH ?? null,
-		LD_LIBRARY_PATH: environment.LD_LIBRARY_PATH ?? null,
+		PATH: nativeEnvironment.PATH ?? null,
+		GOROOT: nativeEnvironment.GOROOT ?? null,
+		COMPILER_PATH: nativeEnvironment.COMPILER_PATH ?? null,
+		LD_LIBRARY_PATH: nativeEnvironment.LD_LIBRARY_PATH ?? null,
 	};
 	const manifestPath = environment.SPECBENCH_TOOLCHAIN_MANIFEST?.trim();
 	if (manifestPath && !existsSync(manifestPath)) {
@@ -880,11 +888,58 @@ export function resolveSpecBenchUvCacheRoot(environment: NodeJS.ProcessEnv = pro
 	return join(home ? resolve(home) : homedir(), ".cache", "uv");
 }
 
+function prependEnvironmentPaths(existing: string | undefined, paths: readonly string[]): string | undefined {
+	const available = paths.filter((path) => existsSync(path));
+	if (existing) available.push(...existing.split(delimiter).filter(Boolean));
+	const deduplicated = [...new Set(available)];
+	return deduplicated.length > 0 ? deduplicated.join(delimiter) : undefined;
+}
+
+export function specBenchNativeToolchainEnvironment(
+	base: NodeJS.ProcessEnv,
+	toolchainRoot: string = SPECBENCH_TOOLCHAIN_ROOT,
+): NodeJS.ProcessEnv {
+	const goRoot = join(toolchainRoot, "v1", "go");
+	const riscVRoot = join(toolchainRoot, "v1", "riscv");
+	const nativeExtraRoot = join(toolchainRoot, "native-extra-v1");
+	return {
+		...base,
+		PATH: prependEnvironmentPaths(base.PATH, [
+			join(nativeExtraRoot, "usr", "bin"),
+			join(goRoot, "bin"),
+			join(riscVRoot, "usr", "bin"),
+		]),
+		GOROOT: base.GOROOT ?? (existsSync(join(goRoot, "bin", "go")) ? goRoot : undefined),
+		LD_LIBRARY_PATH: prependEnvironmentPaths(base.LD_LIBRARY_PATH, [
+			join(nativeExtraRoot, "usr", "lib", "x86_64-linux-gnu"),
+			join(nativeExtraRoot, "usr", "lib", "llvm-21", "lib"),
+			join(riscVRoot, "lib"),
+		]),
+	};
+}
+
+function assertSpecBenchNativeLevelOneToolchains(environment: NodeJS.ProcessEnv): void {
+	for (const [command, args] of [
+		["go", ["version"]],
+		["clang", ["--version"]],
+		["nasm", ["-v"]],
+		["qemu-system-riscv64", ["--version"]],
+		["riscv64-linux-gnu-gcc", ["--version"]],
+	] as const) {
+		const result = spawnSync(command, args, { env: environment, encoding: "utf8", timeout: 30_000 });
+		if (result.status !== 0) {
+			throw new Error(
+				`native SpecBench Level-1 toolchain is unavailable: ${command} (${result.stderr || result.stdout || "not found"})`,
+			);
+		}
+	}
+}
+
 export function ensureSpecBenchNooaUvCache(environment: NodeJS.ProcessEnv = process.env): void {
 	const uvCacheRoot = resolveSpecBenchUvCacheRoot(environment);
 	if (!existsSync(uvCacheRoot)) throw new Error(`SpecBench NOOA uv cache is missing: ${uvCacheRoot}`);
-	const preflightEnvironment = specBenchAgentEnvironment(environment);
-	preflightEnvironment.UV_CACHE_DIR = uvCacheRoot;
+	const nativeEnvironment = specBenchNativeToolchainEnvironment(environment);
+	nativeEnvironment.UV_CACHE_DIR = uvCacheRoot;
 	const result = spawnSync(
 		resolveExecutable("uv"),
 		[
@@ -901,7 +956,7 @@ export function ensureSpecBenchNooaUvCache(environment: NodeJS.ProcessEnv = proc
 			"import nooa_memory",
 		],
 		{
-			env: preflightEnvironment,
+			env: nativeEnvironment,
 			encoding: "utf8",
 			timeout: 120_000,
 		},
@@ -1044,6 +1099,7 @@ function specBenchRunProvenance(
 	const diskWatchdogMaximumCaseBytes = specBenchDiskWatchdogMaximumCaseBytes();
 	return {
 		...prime,
+		maxTokens: options.maxTokens,
 		agentExecutableDigest,
 		...toolchain,
 		configBehaviorDigest: behaviorDigest,
@@ -1054,7 +1110,7 @@ function specBenchRunProvenance(
 		diskWatchdogMaximumCaseBytes,
 		runConfigurationDigest: hashParts([
 			JSON.stringify({
-				schemaVersion: 3,
+				schemaVersion: 4,
 				specbenchRevision,
 				primeRevision: prime.primeRevision,
 				primeWorkspaceDigest: prime.primeWorkspaceDigest,
@@ -1066,6 +1122,7 @@ function specBenchRunProvenance(
 				model: options.model ?? null,
 				thinking: "high",
 				maxTurns: options.maxTurns,
+				maxTokens: options.maxTokens,
 				timeoutMs: options.timeoutMs,
 				hardening: options.hardening,
 				experimentSeed: options.experimentSeed,
@@ -1108,7 +1165,8 @@ Options:
   --model <id>                Prime model override
   --agent-command <path>      Prime launcher (default: prime-agent-avo)
   --config-source <dir>       Prime auth/settings source
-  --max-turns <n>             Autonomous root-turn limit (default: 30)
+  --max-turns <n>             Hard successful assistant-response limit (default: 30)
+  --max-tokens <n>            Autonomous token budget checked between responses (Level-1 default: ${SPECBENCH_LEVEL_1_DEFAULT_MAX_TOKENS})
   --timeout-ms <n>            Per-task timeout (default: ${DEFAULT_TIMEOUT_MS})
   --hardening <on|off>        Hide held-out suites and protect visible tests (default: on)
   --list                      List official tasks
@@ -1137,6 +1195,7 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 		specbenchRoot: process.env.SPECBENCH_ROOT ?? resolve(process.cwd(), "..", "..", "..", "SpecBench"),
 		outputDir: join(homedir(), ".cache", "prime-agent", "specbench", timestamp),
 		maxTurns: 30,
+		maxTokens: SPECBENCH_LEVEL_1_DEFAULT_MAX_TOKENS,
 		timeoutMs: DEFAULT_TIMEOUT_MS,
 		hardening: true,
 		list: false,
@@ -1185,6 +1244,9 @@ export function parseSpecBenchArgs(argv: string[]): SpecBenchOptions {
 				break;
 			case "--max-turns":
 				options.maxTurns = positiveInteger(argv[++index], "--max-turns");
+				break;
+			case "--max-tokens":
+				options.maxTokens = positiveInteger(argv[++index], "--max-tokens");
 				break;
 			case "--timeout-ms":
 				options.timeoutMs = positiveInteger(argv[++index], "--timeout-ms");
@@ -1412,9 +1474,10 @@ export function prepareSpecBenchConfig(source: string, destination: string, prov
 	}
 }
 
-export function specBenchAgentEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function specBenchAgentEnvironment(base: NodeJS.ProcessEnv, graderPython?: string): NodeJS.ProcessEnv {
+	const graderBin = graderPython?.trim() ? dirname(resolve(graderPython)) : undefined;
 	const environment: NodeJS.ProcessEnv = sanitizeAvoVerificationEnvironment({
-		...base,
+		...specBenchNativeToolchainEnvironment(base),
 		GOOGLE_VERTEX_GOOGLE_SEARCH: "0",
 		GOLLUM_USE_DOCKER: "0",
 		OS_KERNEL_USE_DOCKER: "0",
@@ -1423,7 +1486,7 @@ export function specBenchAgentEnvironment(base: NodeJS.ProcessEnv): NodeJS.Proce
 		UV_CACHE_DIR: resolveSpecBenchUvCacheRoot(base),
 		UV_OFFLINE: "1",
 	});
-	delete environment.PYTHONPATH;
+	environment.PATH = prependEnvironmentPaths(environment.PATH, graderBin ? [graderBin] : []);
 	for (const name of BENCHMARK_SECRET_ENVIRONMENT) delete environment[name];
 	for (const name of BENCHMARK_RUNTIME_SOCKET_ENVIRONMENT) delete environment[name];
 	return environment;
@@ -1463,8 +1526,12 @@ export async function withSpecBenchProviderAuthFile<Result>(path: string, run: (
 	}
 }
 
-export function specBenchGradeEnvironment(base: NodeJS.ProcessEnv, workspace: string): NodeJS.ProcessEnv {
-	const environment = specBenchAgentEnvironment(base);
+export function specBenchGradeEnvironment(
+	base: NodeJS.ProcessEnv,
+	workspace: string,
+	graderPython?: string,
+): NodeJS.ProcessEnv {
+	const environment = specBenchAgentEnvironment(base, graderPython);
 	for (const name of Object.keys(environment)) {
 		if (
 			/(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|CREDENTIAL|PRIVATE_KEY)/i.test(name) ||
@@ -1824,12 +1891,15 @@ def test_specbench_public_contract():
         failures = sum(int(suite.attrib.get("failures", "0")) for suite in suites)
         errors = sum(int(suite.attrib.get("errors", "0")) for suite in suites)
         skipped = list(root.iter("skipped"))
+        print(f"SPECBENCH_PUBLIC_SUMMARY tests={tests} failures={failures} errors={errors} skipped={len(skipped)} returncode={result.returncode}")
+        print("SPECBENCH_PUBLIC_DIAGNOSTIC_BEGIN")
+        print(result.stdout)
+        print(result.stderr)
+        print("SPECBENCH_PUBLIC_DIAGNOSTIC_END")
         assert tests > 0, "SpecBench public validation collected zero tests"
         assert tests - len(skipped) > 0, "SpecBench public validation executed zero non-skipped tests"
         assert failures == 0 and errors == 0, "SpecBench public validation reported failures or errors"
         assert not skipped, "SpecBench public validation reported skips"
-    print(result.stdout)
-    print(result.stderr)
     assert result.returncode == 0, "SpecBench public validation suite did not pass"
     assert starter_changed, "SpecBench implementation did not change any starter-file content"
 `;
@@ -1865,6 +1935,7 @@ export function buildSpecBenchAgentArgs(options: {
 	workspace: string;
 	sessionDir: string;
 	maxTurns: number;
+	maxTokens: number;
 	timeoutMs: number;
 	provider?: string;
 	model?: string;
@@ -1881,6 +1952,8 @@ export function buildSpecBenchAgentArgs(options: {
 		"--autonomous",
 		"--autonomous-max-turns",
 		String(options.maxTurns),
+		"--autonomous-max-tokens",
+		String(options.maxTokens),
 		"--autonomous-timeout-ms",
 		String(options.timeoutMs),
 		"--session-dir",
@@ -2229,7 +2302,7 @@ async function gradeSuite(options: {
 			perTestTimeoutSeconds: options.perTestTimeoutSeconds,
 			junitPath,
 		});
-		const environment = specBenchGradeEnvironment(process.env, isolatedWorkspace);
+		const environment = specBenchGradeEnvironment(process.env, isolatedWorkspace, options.graderPython);
 		const timeoutMs = specBenchRemainingGradeTimeoutMs(options.deadline);
 		if (timeoutMs === 0) {
 			const result: CommandResult = {
@@ -2525,7 +2598,7 @@ async function runTask(
 		join(homedir(), ".ssh"),
 		...priorCaseDirectories,
 	]);
-	const verificationEnvironment = specBenchGradeEnvironment(process.env, workspace);
+	const verificationEnvironment = specBenchGradeEnvironment(process.env, workspace, graderPython);
 	delete verificationEnvironment.PYTHONPATH;
 	const startedAt = Date.now();
 	const agentExecution = withSpecBenchBrokerLifecycle(
@@ -2563,13 +2636,14 @@ async function runTask(
 				workspace,
 				sessionDir,
 				maxTurns: options.maxTurns,
+				maxTokens: options.maxTokens,
 				timeoutMs: options.timeoutMs,
 				...(options.provider ? { provider: options.provider } : {}),
 				...(options.model ? { model: options.model } : {}),
 				prompt: specBenchTaskPrompt(task, condition.disabledFeatures),
 			});
 			const environment = {
-				...specBenchAgentEnvironment(process.env),
+				...specBenchAgentEnvironment(process.env, graderPython),
 				...(options.hardening
 					? specBenchKernelSandboxEnvironment({
 							workspace,
@@ -2672,11 +2746,12 @@ async function runTask(
 	);
 	const hiddenSuitesPass = specBenchHiddenSuitesPass(privateGrade, idPrivateGrade);
 	const sessionJsonlPaths = findJsonl(sessionDir);
-	const trace = summarizePrimeIntegrityTrace(sessionJsonlPaths, artifactRoot);
+	const traceJsonlPaths = [...new Set([...sessionJsonlPaths, ...findJsonl(artifactRoot)])];
+	const trace = summarizePrimeIntegrityTrace(traceJsonlPaths, artifactRoot);
 	const agentInfrastructureError = specBenchAgentInfrastructureErrorFromSessionJsonl(sessionJsonlPaths);
 	const networkPolicyViolations = [
 		...specBenchNetworkPolicyViolations(trace.commands),
-		...specBenchNetworkToolViolationsFromJsonl(sessionJsonlPaths),
+		...specBenchNetworkToolViolationsFromJsonl(traceJsonlPaths),
 	];
 	const protocolInvalidReason =
 		networkPolicyViolations.length > 0
@@ -2921,7 +2996,7 @@ function writeReport(
 	);
 	const conditions = aggregateSpecBenchConditions(results);
 	const report = {
-		schemaVersion: 15,
+		schemaVersion: 17,
 		benchmark: "WecoAI SpecBench via Prime AVO",
 		specbenchRevision,
 		provider: options.provider,
@@ -2995,6 +3070,12 @@ function writeReport(
 		.map(
 			(condition) =>
 				`| ${condition.conditionId} | ${condition.meanInputTokensPerModelCall.toFixed(0)} | ${condition.meanCacheReadTokensPerModelCall.toFixed(0)} | ${PRIME_INTEGRITY_TOKEN_STAGES.map((stage) => condition.meanTokenUsageByStage[stage].toFixed(0)).join(" | ")} |`,
+		)
+		.join("\n");
+	const costStageRows = conditions
+		.map(
+			(condition) =>
+				`| ${condition.conditionId} | ${PRIME_INTEGRITY_TOKEN_STAGES.map((stage) => `$${condition.meanModelUsageByStage[stage].costUsd.toFixed(4)}`).join(" | ")} |`,
 		)
 		.join("\n");
 	const completionRows = conditions
@@ -3096,15 +3177,41 @@ ${adversarialProbeRunRows}`;
 		"report.md",
 		finalizeSpecBenchReportMarkdown(
 			insertSpecBenchReportSection(
-				`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the fourth ignored coding-loop intervention. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable. Long-horizon coding also requires at least two distinct pre-mortem assumptions before the first workspace change; each remains unresolved until candidate-bound host evidence addresses it.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
+				`# WecoAI SpecBench via Prime AVO\n\nUpstream revision: \`${specbenchRevision}\`\n\nExecution-order seed: \`${options.experimentSeed}\`. Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only task/repetition pairs present in both the condition and full AVO. Obligation evidence columns are scoped to the candidate in the latest accepted cycle; they are diagnostics, not an additional acceptance gate. Identity-private is hidden in-distribution coverage; held-out is the benchmark's compositional private suite. Spec compliance requires both hidden suites when identity-private is present.\n\n## Conditions\n\n| Condition | Runs | Paired | Validation | ID-private | Held-out | Gap | Canonical completion | False completion | Nonzero exit | Timeout | Tokens | Model calls | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Time | Cost | Held-out Δ vs full | Student-t 95% CI |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n${conditionRows}\n\n## Model-token attribution\n\nBilled model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution, not a causal decomposition; uncached input and cache-read tokens can both contain accumulated context from earlier stages.\n\n| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${tokenStageRows}\n\n## Anti-laziness diagnostics\n\nTool probation activates on the first coding-loop intervention after four consecutive non-progress tool batches. A blocked-call count of zero can still mean probation worked: the model may respond to the activation by making its next cell milestone-capable. Long-horizon coding also requires at least two distinct pre-mortem assumptions before the first workspace change; each remains unresolved until candidate-bound host evidence addresses it.\n\n| Condition | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRows}\n\n### Anti-laziness runs\n\n| Condition | Rep | Task | Candidates | Cycles | Accepted | Revised | Pre-mortem assumptions | Resolved assumptions | Watchdog interventions | Watches | Probation activations | Blocked calls | Model calls | Tool calls |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${antiLazinessRunRows}\n\n## Completion-loop diagnostics\n\nA completion attempt is an explicit stop-gate/complete call, a host-blocked root delivery, or a host-confirmed canonical delivery that reached durable completion. “After first” includes all later model work. “Completion repair” contains otherwise-unclassified tool turns after a non-passing attempt; post-ready work separately captures unnecessary tool work after a passing gate. Repair amplification is zero when the first attempt passes; raw after-first counters remain visible so canonical-delivery/context cost is not hidden. Blocker-clearance token counts can overlap when one turn clears multiple blockers.\n\n| Condition | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output | Repair uncached/call | Repair cached/call | Repair output/call |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRows}\n\n### Completion runs\n\n| Condition | Rep | Task | First ready | Attempts | Failed | Repair turns | After-first uncached input | After-first cached input | After-first output | After-first total | Repair amplification | Unique blockers | Repeated blockers | Consecutive repeats | Repair calls | Repair uncached input | Repair cached input | Repair output |\n| --- | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${completionRunRows}\n\n### Completion blockers\n\n| Condition | Rep | Task | Blocker | Attempts seen | Occurrences | Cleared at | Turns to clear | Tokens to clear | Latest reason |\n| --- | ---: | --- | --- | --- | ---: | --- | ---: | ---: | --- |\n${completionBlockerRows || "| _none_ |  |  |  |  | 0 |  |  |  | No failed completion blockers observed. |"}\n\n## Runs\n\n| Condition | Rep | Task | Validation | ID-private | Held-out | Gap | Canonical completion | Exit | Timeout | False completion | Obligations | Evidence receipts | Mean O/receipt | Max O/receipt | D evidence | C max | Tokens | Cost |\n| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${rows}\n`,
 				`${codingPivotSection}${adversarialProbeSection}`,
 			),
+			costStageRows,
+			{ maxTurns: options.maxTurns, maxTokens: options.maxTokens },
 		),
 	);
 }
 
-function finalizeSpecBenchReportMarkdown(markdown: string): string {
+function finalizeSpecBenchReportMarkdown(
+	markdown: string,
+	costStageRows: string,
+	limits: { maxTurns: number; maxTokens: number },
+): string {
 	return markdown
+		.replace(
+			"Execution-order seed:",
+			`Autonomous limits: ${limits.maxTurns} successful assistant responses and ${limits.maxTokens} configured tokens. The token budget is checked between responses, so one already-started response can overshoot the configured cap.\n\nExecution-order seed:`,
+		)
+		.replace(
+			"Billed model tokens are assigned to the assistant turn's dominant observable activity. This is diagnostic attribution",
+			"Billed model tokens are assigned to the assistant turn's dominant observable activity. Root and retained-child session traces are included; child memory identifies NOOA reflection, verification, and reconciliation model work. This is diagnostic attribution",
+		)
+		.replace(
+			"| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+			"| Condition | Uncached input/call | Cached input/call | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Child memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+		)
+		.replace(
+			"\n\n## Anti-laziness diagnostics",
+			`\n\n### Model cost by stage\n\n| Condition | Setup | Implementation | Candidate/evaluation | Obligation coverage | Completion | Completion repair | Post-ready work | Memory | Child memory | Other/final |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n${costStageRows}\n\n## Anti-laziness diagnostics`,
+		)
+		.replace(
+			"A completion attempt is an explicit stop-gate/complete call or a host-blocked root delivery.",
+			"A completion attempt requires either a completed explicit stop-gate/complete result or a host-blocked root delivery; an unresolved call alone is not an attempt.",
+		)
 		.replace(
 			"Provider sampling can remain stochastic; use multiple repetitions before causal claims. Deltas use only",
 			"Provider sampling can remain stochastic; use multiple repetitions before causal claims. Scores, deltas, and paired comparisons exclude infrastructure-invalid and protocol-invalid runs; paid attempts remain in cost totals. Network-command detection is an auditable heuristic and does not physically block model-process egress. Deltas use only",
@@ -3352,11 +3459,12 @@ async function main(): Promise<void> {
 	assertSpecBenchDiskCapacity(options.outputDir, specBenchDiskWatchdogMinimumBytes());
 	const agentExecutable = resolveExecutable(options.agentCommand);
 	const grader = ensureSpecBenchGraderPython();
-	const benchmarkEnvironment = specBenchAgentEnvironment(process.env);
+	const nativeEnvironment = specBenchAgentEnvironment(process.env);
+	if (options.all && !options.limit) assertSpecBenchNativeLevelOneToolchains(nativeEnvironment);
 	if (options.conditions.some((conditionId) => !specBenchCondition(conditionId).disabledFeatures.includes("nooa"))) {
-		ensureSpecBenchNooaUvCache(benchmarkEnvironment);
+		ensureSpecBenchNooaUvCache(nativeEnvironment);
 	}
-	const provenance = specBenchRunProvenance(options, specbenchRevision, agentExecutable, grader, benchmarkEnvironment);
+	const provenance = specBenchRunProvenance(options, specbenchRevision, agentExecutable, grader, nativeEnvironment);
 	const results: SpecBenchResult[] = [];
 	const jobs = specBenchJobs(selected, options);
 	for (const [index, job] of jobs.entries()) {

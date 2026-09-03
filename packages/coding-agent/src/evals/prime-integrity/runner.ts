@@ -985,6 +985,20 @@ function tokenStageForAssistant(
 	return "implementation";
 }
 
+function childTokenStage(
+	sessionEvents: Array<{ entry: Record<string, unknown> }>,
+): PrimeIntegrityTokenStage | undefined {
+	const session = sessionEvents.find((event) => event.entry.type === "session")?.entry;
+	if (typeof session?.rlmDepth !== "number" || session.rlmDepth <= 0) return undefined;
+	const prompt = sessionEvents
+		.filter((event) => event.entry.type === "custom_message")
+		.map((event) => (typeof event.entry.content === "string" ? event.entry.content : ""))
+		.join("\n");
+	return /\b(?:NOOA-compatible|memory verifier|memory reconciler)\b/i.test(prompt)
+		? "child_memory"
+		: "candidate_evaluation";
+}
+
 function completionToolCalls(content: unknown): Array<{ toolCallId: string; source: "explicit_stop_gate" }> {
 	if (!Array.isArray(content)) return [];
 	return content.flatMap((part) => {
@@ -1249,6 +1263,15 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 		>;
 	};
 	const completionTrackingBySession = new Map<string, SessionCompletionTracking>();
+	const canonicalDeliverySignals: Array<
+		Omit<PrimeIntegrityCompletionAttempt, "attempt" | "blockerIds" | "blockerReasons" | "reasons">
+	> = [];
+	const childTokenStageBySession = new Map(
+		[...new Set(sessionEvents.map((event) => event.path))].flatMap((path) => {
+			const stage = childTokenStage(sessionEvents.filter((event) => event.path === path));
+			return stage ? [[path, stage] as const] : [];
+		}),
+	);
 	for (const { path, entry } of sessionEvents) {
 		let tracking = completionTrackingBySession.get(path);
 		if (!tracking) {
@@ -1262,7 +1285,19 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 		if (entry.type === "custom_message" && entry.customType === "avo_progress_intervention") {
 			const details =
 				entry.details && typeof entry.details === "object" ? (entry.details as Record<string, unknown>) : {};
-			if (details.escalationLevel === 4) summary.toolProbationActivations += 1;
+			if (details.escalationLevel === 1) summary.toolProbationActivations += 1;
+		}
+		if (entry.type === "custom_message" && entry.customType === "avo_canonical_delivery_required") {
+			const details =
+				entry.details && typeof entry.details === "object" ? (entry.details as Record<string, unknown>) : {};
+			if (details.gatePassed === true) {
+				canonicalDeliverySignals.push({
+					source: "host_completion",
+					assistantTurn: summary.assistantTurns,
+					...(typeof entry.timestamp === "string" ? { timestamp: entry.timestamp } : {}),
+					passed: true,
+				});
+			}
 		}
 		const customAttempt = customCompletionAttempt(entry, summary.assistantTurns);
 		if (customAttempt) {
@@ -1275,11 +1310,9 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 		const text = messageText(message.content);
 		if (message.role === "assistant") {
 			const toolText = assistantToolText(message.content);
-			const tokenStage = tokenStageForAssistant(
-				toolText,
-				tracking.seenCompletionAttempt,
-				tracking.latestCompletionAttemptPassed,
-			);
+			const tokenStage =
+				childTokenStageBySession.get(path) ??
+				tokenStageForAssistant(toolText, tracking.seenCompletionAttempt, tracking.latestCompletionAttemptPassed);
 			const stageUsage = summary.tokenUsageByStage[tokenStage];
 			summary.assistantTurns += 1;
 			summary.modelCalls += 1;
@@ -1339,10 +1372,9 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					}
 				}
 			}
-			if (isCompletionGateAttempt(toolText)) tracking.seenCompletionAttempt = true;
 		}
 		if (message.role === "toolResult" && typeof message.toolCallId === "string") {
-			if (text.includes("AVO host tool probation blocked another non-milestone IPython call")) {
+			if (/AVO host tool probation blocked (?:a|another) non-milestone IPython call/.test(text)) {
 				summary.toolProbationBlockedCalls += 1;
 			}
 			const pending = tracking.pendingCompletionAttempts.get(message.toolCallId);
@@ -1353,6 +1385,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					...parseCompletionGateText(text),
 				};
 				summary.completionAttempts.push(observedAttempt);
+				tracking.seenCompletionAttempt = true;
 				tracking.latestCompletionAttemptPassed = observedAttempt.passed;
 				tracking.pendingCompletionAttempts.delete(message.toolCallId);
 			}
@@ -1373,7 +1406,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					parentCandidateId?: unknown;
 					workspaceDigest?: unknown;
 				}>;
-				cycles?: Array<{ candidateId?: unknown; outcome?: unknown }>;
+				cycles?: Array<{ cycleId?: unknown; candidateId?: unknown; outcome?: unknown }>;
 				obligations?: unknown[];
 				obligationCoverage?: Array<{
 					candidateId?: unknown;
@@ -1389,7 +1422,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 					issuedBy?: unknown;
 					metrics?: Record<string, unknown>;
 				}>;
-				supervision?: Array<{ status?: unknown }>;
+				supervision?: Array<{ cycleId?: unknown; source?: unknown; status?: unknown }>;
 				checkpoints?: Array<{
 					status?: unknown;
 					reason?: unknown;
@@ -1403,13 +1436,22 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			);
 			summary.candidates = Math.max(summary.candidates, state.candidates?.length ?? 0);
 			summary.cycles = Math.max(summary.cycles, state.cycles?.length ?? 0);
+			const finalCycleOutcomes = (state.cycles ?? []).map((cycle) => {
+				if (cycle.outcome !== "accepted" || typeof cycle.cycleId !== "string") return cycle.outcome;
+				const latestReview = [...(state.supervision ?? [])]
+					.reverse()
+					.find((review) => review.cycleId === cycle.cycleId && review.source === "retained_supervisor");
+				if (latestReview?.status === "intervene") return "revised";
+				if (latestReview?.status === "watch") return "pending";
+				return cycle.outcome;
+			});
 			summary.acceptedCycles = Math.max(
 				summary.acceptedCycles,
-				state.cycles?.filter((cycle) => cycle.outcome === "accepted").length ?? 0,
+				finalCycleOutcomes.filter((outcome) => outcome === "accepted").length,
 			);
 			summary.revisedCycles = Math.max(
 				summary.revisedCycles,
-				state.cycles?.filter((cycle) => cycle.outcome === "revised").length ?? 0,
+				finalCycleOutcomes.filter((outcome) => outcome === "revised").length,
 			);
 			const authoritativeRevisionCandidateIds = new Set(
 				(state.routing?.environment === "coding" ? (state.evaluations ?? []) : []).flatMap((evaluation) =>
@@ -1627,7 +1669,7 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 			const probationActivations = checkpoints.filter(
 				(checkpoint) =>
 					typeof checkpoint.reason === "string" &&
-					/^Anti-laziness (?:timeout )?escalation 4:/.test(checkpoint.reason),
+					/^(?:Anti-laziness tool intervention|Anti-laziness timeout escalation 1):/.test(checkpoint.reason),
 			).length;
 			// The durable checkpoint ledger is authoritative. The same watchdog event
 			// can also appear in the transcript, so take the larger count instead of
@@ -1638,6 +1680,20 @@ export function summarizePrimeIntegrityTrace(sessionPaths: string[], artifactRoo
 		} catch {
 			// A damaged optional AVO artifact must not prevent the host from grading the workspace.
 		}
+	}
+	if (
+		summary.completedRuns > 0 &&
+		!summary.completionAttempts.some((attempt) => attempt.passed === true) &&
+		canonicalDeliverySignals.length > 0
+	) {
+		const signal = canonicalDeliverySignals[0];
+		summary.completionAttempts.push({
+			attempt: summary.completionAttempts.length + 1,
+			...signal,
+			blockerIds: [],
+			blockerReasons: {},
+			reasons: [],
+		});
 	}
 	finalizeCompletionDiagnostics(summary, turnUsage);
 	return summary;

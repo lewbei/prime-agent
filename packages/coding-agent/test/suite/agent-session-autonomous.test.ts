@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	addAutonomousUsage,
@@ -114,6 +116,87 @@ describe("AgentSession autonomous mode", () => {
 		]);
 		expect(getUserTexts(harness)).toEqual(["make the change", DEFAULT_AUTONOMOUS_CONTINUATION_PROMPT]);
 		expect(harness.session.getAutonomousStatus().continuationsUsed).toBe(1);
+	});
+
+	it("enforces the assistant-turn limit inside a continuous tool loop after the in-flight tool finishes", async () => {
+		const executed: number[] = [];
+		const evidenceTool: AgentTool = {
+			name: "evidence",
+			label: "Evidence",
+			description: "Records host-observed evidence",
+			parameters: Type.Object({ step: Type.Number() }),
+			execute: async (_toolCallId, params) => {
+				executed.push((params as { step: number }).step);
+				return { content: [{ type: "text", text: "recorded" }], details: {} };
+			},
+		};
+		const harness = await createHarness({
+			tools: [evidenceTool],
+			autonomous: { enabled: true, maxContinuations: 99, maxTurns: 2, maxTokens: 1_000_000 },
+		});
+		harnesses.push(harness);
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("evidence", { step: 1 }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("evidence", { step: 2 }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("evidence", { step: 3 }), { stopReason: "toolUse" }),
+		]);
+
+		await harness.session.prompt("collect bounded evidence");
+
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(executed).toEqual([1, 2]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.session.getAutonomousStatus()).toMatchObject({
+			turnsUsed: 2,
+			continuationsUsed: 0,
+		});
+	});
+
+	it("runs host quality gates on evidence produced by the limit-closing tool batch", async () => {
+		const suffix = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+		const evidencePath = join(process.cwd(), `.tmp-autonomous-final-evidence-${suffix}`);
+		const gateMarkerPath = join(process.cwd(), `.tmp-autonomous-final-gate-${suffix}`);
+		const evidenceTool: AgentTool = {
+			name: "final_evidence",
+			label: "Final evidence",
+			description: "Creates the artifact observed by the host quality gate",
+			parameters: Type.Object({}),
+			execute: async () => {
+				writeFileSync(evidencePath, "verified\n");
+				return { content: [{ type: "text", text: "recorded" }], details: {} };
+			},
+		};
+		const gateScript = [
+			"const fs = require('node:fs');",
+			`if (!fs.existsSync(${JSON.stringify(evidencePath)})) process.exit(1);`,
+			`fs.writeFileSync(${JSON.stringify(gateMarkerPath)}, 'gate observed final evidence\\n');`,
+		].join(" ");
+		try {
+			const harness = await createHarness({
+				tools: [evidenceTool],
+				autonomous: {
+					enabled: true,
+					maxContinuations: 99,
+					maxTurns: 1,
+					maxTokens: 1_000_000,
+					gates: { commands: [`${process.execPath} -e ${JSON.stringify(gateScript)}`] },
+				},
+			});
+			harnesses.push(harness);
+			harness.setResponses([fauxAssistantMessage(fauxToolCall("final_evidence", {}), { stopReason: "toolUse" })]);
+
+			await harness.session.prompt("produce final host evidence");
+
+			expect(harness.faux.state.callCount).toBe(1);
+			expect(existsSync(gateMarkerPath)).toBe(true);
+			expect(harness.session.getAutonomousStatus()).toMatchObject({
+				turnsUsed: 1,
+				lastGateFailure: undefined,
+			});
+		} finally {
+			rmSync(evidencePath, { force: true });
+			rmSync(gateMarkerPath, { force: true });
+		}
 	});
 
 	it("does not count failed assistant messages against autonomous usage limits", async () => {

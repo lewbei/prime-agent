@@ -17,6 +17,7 @@ export const PRIME_INTEGRITY_TOKEN_STAGES = [
 	"completion_repair",
 	"post_ready_work",
 	"memory",
+	"child_memory",
 	"other",
 ] as const;
 

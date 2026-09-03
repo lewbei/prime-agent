@@ -1,6 +1,6 @@
-import { rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	AGENT_MESSAGE_SOURCE,
 	type AgentSessionMessageController,
@@ -97,6 +97,19 @@ function supervisorMessage(
 
 describe("AgentSession AVO adversarial probes", () => {
 	let harness: Harness | undefined;
+	const previousAvoEnv = process.env.PRIME_ENABLE_AVO;
+
+	beforeAll(() => {
+		process.env.PRIME_ENABLE_AVO = "1";
+	});
+
+	afterAll(() => {
+		if (previousAvoEnv === undefined) {
+			delete process.env.PRIME_ENABLE_AVO;
+		} else {
+			process.env.PRIME_ENABLE_AVO = previousAvoEnv;
+		}
+	});
 
 	afterEach(() => {
 		harness?.cleanup();
@@ -488,6 +501,89 @@ describe("AgentSession AVO adversarial probes", () => {
 				unavailable,
 			),
 		).resolves.toMatchObject({ status: "watch" });
+	});
+
+	it("accepts SpecBench entrypoints while excluding public-test imports from the callable surface", async () => {
+		harness = await createHarness({ persistSession: true });
+		writeFileSync(
+			`${harness.tempDir}/json_parser.py`,
+			[
+				"def parse(text: str) -> object:",
+				'    raise NotImplementedError("implement parser")',
+				"",
+				"def serialize(obj: object) -> str:",
+				'    raise NotImplementedError("implement serializer")',
+				"",
+			].join("\n"),
+		);
+		mkdirSync(`${harness.tempDir}/.specbench-visible/tests/public`, { recursive: true });
+		writeFileSync(
+			`${harness.tempDir}/.specbench-visible/tests/public/test_public.py`,
+			"from json_parser import parse, serialize\n\ndef test_round_trip():\n    assert parse(serialize(None)) is None\n",
+		);
+		harness.setResponses([fauxAssistantMessage("working")]);
+		await harness.session.prompt(
+			[
+				"Implement these two functions in json_parser.py:",
+				"",
+				"```python",
+				"def parse(text: str) -> object:",
+				"    pass",
+				"",
+				"def serialize(obj: object) -> str:",
+				"    pass",
+				"```",
+				"",
+				"Any character may appear in a JSON string. Preserve both public signatures and run the public tests.",
+			].join("\n"),
+		);
+		await harness.session.handleAvoHostRequest("avo.obligations.register", {
+			obligations: Array.from({ length: 4 }, (_, index) => ({
+				obligation_id: `json-parser-${index}`,
+				description: `JSON parser requirement ${index}`,
+				kind: "functional",
+				critical: true,
+				required_evidence: ["runtime"],
+			})),
+		});
+		writeFileSync(
+			`${harness.tempDir}/json_parser.py`,
+			[
+				"from typing import Any",
+				"",
+				"def parse(text: str) -> object:",
+				"    return None if text == 'null' else text",
+				"",
+				"def serialize(obj: object) -> str:",
+				"    return 'null' if obj is None else str(obj)",
+				"",
+			].join("\n"),
+		);
+		await harness.session.handleAvoHostRequest("avo.candidate.add", {
+			candidate: {
+				candidate_id: "specbench-json-parser",
+				kind: "implementation",
+				summary: "Implement the declared JSON parser entrypoints",
+				payload: { module: "json_parser.py" },
+				obligation_ids: Array.from({ length: 4 }, (_, index) => `json-parser-${index}`),
+			},
+		});
+		const internals = harness.session as unknown as {
+			_avoRuntime: AvoSessionRuntime;
+			_avoPythonProbeBindings(
+				state: AvoRunState,
+				candidate: AvoRunState["candidates"][number],
+			): AvoPythonProbeBindings | undefined;
+		};
+		const candidate = internals._avoRuntime.getState().candidates.at(-1);
+		if (!candidate) throw new Error("candidate was not recorded");
+		expect(candidate.workspaceChangedPaths).toEqual(["json_parser.py"]);
+		expect(internals._avoPythonProbeBindings(internals._avoRuntime.getState(), candidate)).toMatchObject({
+			modulePaths: ["json_parser.py"],
+			requiredCallables: ["parse", "serialize"],
+			callableInputDimensions: { parse: ["arg:0"], serialize: ["arg:0"] },
+			surfaceError: undefined,
+		});
 	});
 
 	it("derives every named API from all changed Python modules without excerpt or eight-API truncation", async () => {

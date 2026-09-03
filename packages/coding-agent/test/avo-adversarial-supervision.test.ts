@@ -392,6 +392,9 @@ describe.sequential("AVO adversarial acceptance supervision", () => {
 		const asynchronous = inspectAvoPythonPublicCallables(
 			'async def match(value: str, mode="strict") -> bool:\n    return True\n',
 		);
+		const differentReturn = inspectAvoPythonPublicCallables(
+			'def match(value: str, mode="strict") -> str:\n    return "true"\n',
+		);
 		const namedStrict = inspectAvoPythonPublicCallables(
 			'DEFAULT = "strict"\ndef match(value, mode=DEFAULT):\n    return True\n',
 		);
@@ -413,6 +416,11 @@ describe.sequential("AVO adversarial acceptance supervision", () => {
 		expect(strict.callables[0]?.signatureDigest).not.toBe(lazy.callables[0]?.signatureDigest);
 		expect(strict.callables[0]?.signatureDigest).not.toBe(annotated.callables[0]?.signatureDigest);
 		expect(strict.callables[0]?.signatureDigest).not.toBe(asynchronous.callables[0]?.signatureDigest);
+		expect(strict.callables[0]?.signatureDigest).not.toBe(differentReturn.callables[0]?.signatureDigest);
+		expect(strict.callables[0]?.parameterSignatureDigest).toBe(
+			differentReturn.callables[0]?.parameterSignatureDigest,
+		);
+		expect(strict.callables[0]?.parameterSignatureDigest).not.toBe(annotated.callables[0]?.parameterSignatureDigest);
 		expect(namedStrict.callables[0]?.signatureDigest).not.toBe(namedLazy.callables[0]?.signatureDigest);
 		expect(reassignedStrict.callables[0]?.signatureDigest).not.toBe(reassignedLazy.callables[0]?.signatureDigest);
 		expect(computedStrict.callables.find((item) => item.name === "match")?.signatureDigest).not.toBe(

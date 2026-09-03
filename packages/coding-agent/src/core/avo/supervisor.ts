@@ -75,7 +75,7 @@ export function shouldActivateStagnationSupervisor(stagnation: {
 }
 
 export function shouldActivateAvoSupervisor(state: AvoRunState, checkpoint?: AvoCheckpoint): boolean {
-	if (state.status === "failed" || state.delivery.phase === "failed") return false;
+	if (state.status === "failed" || state.delivery?.phase === "failed") return false;
 	if (requiresAvoAdversarialReview(state, checkpoint?.cycleId)) return true;
 	if (state.routing.horizon === "direct") return false;
 	if (checkpoint && state.routing.horizon === "long") return true;
