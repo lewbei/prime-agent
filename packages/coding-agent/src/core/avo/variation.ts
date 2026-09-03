@@ -51,7 +51,11 @@ export function isScoreImproving(
 		const candVal = candidateScores[dim.name];
 		const baseVal = baselineScores[dim.name];
 
-		if (candVal === undefined || baseVal === undefined) {
+		if (candVal === undefined) {
+			return false; // Candidate is missing a required score dimension
+		}
+		if (baseVal === undefined) {
+			hasImprovement = true;
 			continue;
 		}
 
@@ -101,8 +105,14 @@ export function updateAvoLineage<T = unknown>(
 	const baseline = lineage.baselineScore ?? {};
 	const improves = isScoreImproving(candidate.scores, baseline, dimensions);
 
-	// Also check if candidate matches baseline (tie)
-	const matches = Object.entries(baseline).every(([key, val]) => candidate.scores[key] === val);
+	// Also check if candidate matches baseline (tie across declared dimensions)
+	const matches =
+		dimensions.length > 0
+			? dimensions.every(
+					(dim) => candidate.scores[dim.name] !== undefined && candidate.scores[dim.name] === baseline[dim.name],
+				)
+			: Object.keys(baseline).length > 0 &&
+				Object.entries(baseline).every(([key, val]) => candidate.scores[key] === val);
 
 	if (!improves && !matches) {
 		return {
@@ -144,14 +154,22 @@ export function detectAvoStagnation(
 		if (!receipt) continue;
 
 		if (!receipt.passedCorrectness || receipt.executionStatus !== "pass") {
+			if (consecutiveRegressions > 0) {
+				break;
+			}
 			consecutiveFailures++;
 			if (receipt.logs) {
 				repeatedErrors.push(receipt.logs.slice(0, 100));
 			}
 		} else {
-			if (baselineScore && scoreDimensions) {
+			if (consecutiveFailures > 0) {
+				break;
+			}
+			if (baselineScore && scoreDimensions && scoreDimensions.length > 0) {
 				const improves = isScoreImproving(receipt.scores, baselineScore, scoreDimensions);
-				const matches = Object.entries(baselineScore).every(([k, v]) => receipt.scores[k] === v);
+				const matches = scoreDimensions.every(
+					(dim) => receipt.scores[dim.name] !== undefined && receipt.scores[dim.name] === baselineScore[dim.name],
+				);
 				if (!improves && !matches) {
 					consecutiveRegressions++;
 					continue;
@@ -350,6 +368,12 @@ export class AvoVariationEpisodeController<T = unknown> {
 		}
 
 		this._latestReceipt = receipt;
+		this._latestCandidateRef = candidateRef;
+		if (content !== undefined) {
+			this._latestContentDigest = digestContent(content);
+		} else if (receipt.candidateDigest) {
+			this._latestContentDigest = receipt.candidateDigest;
+		}
 
 		this.recordAction("evaluate", {
 			candidateRef,
@@ -421,12 +445,25 @@ export class AvoVariationEpisodeController<T = unknown> {
 
 		if (this._latestReceipt && this._latestReceipt.passedCorrectness && this._latestCandidateRef) {
 			const baseline = this.contract.lineage.baselineScore ?? {};
-			const improves = isScoreImproving(this._latestReceipt.scores, baseline, this.contract.scorer.scoreDimensions);
-			const matches = Object.entries(baseline).every(([k, v]) => this._latestReceipt?.scores[k] === v);
+			const dims = this.contract.scorer.scoreDimensions;
+			const improves = isScoreImproving(this._latestReceipt.scores, baseline, dims);
+			const matches =
+				dims.length > 0
+					? dims.every(
+							(dim) =>
+								this._latestReceipt?.scores[dim.name] !== undefined &&
+								this._latestReceipt.scores[dim.name] === baseline[dim.name],
+						)
+					: Object.keys(baseline).length > 0 &&
+						Object.entries(baseline).every(([k, v]) => this._latestReceipt?.scores[k] === v);
 
 			if (improves || matches) {
+				const digest =
+					this._latestContentDigest ??
+					this._latestReceipt.candidateDigest ??
+					digestContent(this._latestCandidateRef);
 				const candidateSolution: AvoCommittedSolution<T> = {
-					solutionId: `sol-${digestContent(this._latestCandidateRef).slice(0, 12)}`,
+					solutionId: `sol-${digest.slice(0, 12)}`,
 					solutionRef: this._latestCandidateRef,
 					payload: this._latestPayload,
 					scores: { ...this._latestReceipt.scores },
