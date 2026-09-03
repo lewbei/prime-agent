@@ -137,7 +137,14 @@ export function parseAvoClaimVerifierMessage(message: string, marker: string): A
 	if (!normalized.startsWith(prefix)) {
 		throw new Error(`claim verifier response must start with the exact marker ${marker}`);
 	}
-	const parsed = JSON.parse(normalized.slice(prefix.length).trim()) as unknown;
+	let rawJson = normalized.slice(prefix.length).trim();
+	if (rawJson.startsWith("```")) {
+		rawJson = rawJson
+			.replace(/^```(?:json)?\s*\n?/, "")
+			.replace(/\n?```\s*$/, "")
+			.trim();
+	}
+	const parsed = JSON.parse(rawJson) as unknown;
 	if (!isRecord(parsed)) throw new Error("claim verifier response must be a JSON object");
 	if (
 		Object.keys(parsed).some(

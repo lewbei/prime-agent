@@ -171,7 +171,7 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     if "ready" in handle.output():
                         break
                     await asyncio.sleep(0.05)
-                handle.kill(signal.SIGTERM)
+                handle.kill(signal.SIGTERM, grace=1.0)
                 records = await _poll_journal(journal, count=2, timeout=10)
             self.assertFalse(records[-1]["active"])
             await _poll_group_dead(handle.pid)
