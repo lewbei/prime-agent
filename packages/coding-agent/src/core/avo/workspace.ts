@@ -692,11 +692,15 @@ function hasClosedVerificationRunner(
 	const tokens = shellCommandTokens(command);
 	const executable = tokens[0]?.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
 	if (runnerFamily === "pytest") {
+		if (/^(?:pytest|py\.test)(?:\.exe)?$/.test(executable)) return true;
 		if (!/^python(?:3(?:\.\d+)?)?(?:\.exe)?$/.test(executable)) return false;
 		const moduleIndex = tokens.indexOf("-m");
 		return moduleIndex > 0 && tokens[moduleIndex + 1] === "pytest";
 	}
-	if (runnerFamily === "node_test") return executable === "node" && tokens.includes("--test");
+	if (runnerFamily === "node_test") {
+		if (/^(?:vitest|jest)(?:\.cmd|\.ps1|\.sh)?$/.test(executable)) return true;
+		return executable === "node" && tokens.includes("--test");
+	}
 	return false;
 }
 
@@ -1038,7 +1042,10 @@ export function captureAvoVerificationHarnessManifest(
 			unsupportedReasons.push(`verifier control could not be read: ${path}`);
 			continue;
 		}
-		if (runnerFamily === "pytest" && controls.get(path) === "config") {
+		const isPytestConfigFile = /^(?:pytest\.ini|\.pytest\.ini|pyproject\.toml|setup\.cfg|tox\.ini)$/i.test(
+			path.split("/").at(-1) ?? "",
+		);
+		if (runnerFamily === "pytest" && controls.get(path) === "config" && isPytestConfigFile) {
 			if (pytestCaptureIsUnsafe(source)) {
 				unsupportedReasons.push(`pytest configuration disables fd-bound output capture: ${path}`);
 			}
