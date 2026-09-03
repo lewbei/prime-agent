@@ -211,12 +211,14 @@ export function isTestFile(path: string): boolean {
 	return (
 		/(?:^|\/)(?:test|tests|__tests__|verifier|verifiers|benchmark|benchmarks)\//.test(normalized) ||
 		/(?:\.test|\.spec)\.[a-z0-9]+$/.test(name) ||
-		/^(?:test|verify|check|validate|certify|grader|benchmark)[_-].+\.py$/.test(name) ||
-		/.+[_-](?:test|verify|verifier|verification|certify|certification|check|validate|benchmark)\.(?:py|go|rs)$/.test(
+		/^(?:test|verify|check|validate|certify|grader|benchmark)[_-].+\.(?:py|ts|js|mjs|cjs|sh|bash|go|rs)$/.test(
 			name,
 		) ||
-		/.+_test\.(?:py|go|rs)$/.test(name) ||
-		/(?:test|tests)\.(?:java|kt|cs|swift)$/.test(name)
+		/.+[_-](?:test|verify|verifier|verification|certify|certification|check|validate|benchmark)\.(?:py|ts|js|mjs|cjs|sh|bash|go|rs)$/.test(
+			name,
+		) ||
+		/.+_test\.(?:py|ts|js|mjs|cjs|sh|bash|go|rs)$/.test(name) ||
+		/(?:test|tests)\.(?:java|kt|cs|swift|py|ts|js|go|rs)$/.test(name)
 	);
 }
 
@@ -1393,12 +1395,13 @@ export function isAvoVerifierScript(path: string): boolean {
 	const normalized = path.replaceAll("\\", "/").toLowerCase();
 	const name = normalized.split("/").at(-1) ?? normalized;
 	if (name === "conftest.py" || name.includes("fixture")) return false;
+	const ext = /\.(?:py|ts|js|mjs|cjs|sh|bash|go|rs)$/;
+	if (!ext.test(name)) return false;
+	const stem = name.replace(ext, "");
 	return (
-		/^(?:verify|verification|check|validate|validation|certify|certification|grader|benchmark)[_-].+\.py$/.test(
-			name,
-		) ||
-		/.+[_-](?:verify|verification|certify|certification|grader|benchmark)\.py$/.test(name) ||
-		/^(?:verify|certification|benchmark|validate)\.py$/.test(name)
+		/^(?:verify|verification|check|validate|validation|certify|certification|grader|benchmark)[_-].+$/.test(stem) ||
+		/.+[_-](?:verify|verification|certify|certification|grader|benchmark)$/.test(stem) ||
+		/^(?:verify|certification|benchmark|validate)$/.test(stem)
 	);
 }
 

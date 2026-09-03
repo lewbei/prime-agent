@@ -554,10 +554,11 @@ export function parseAvoTrialMetricsOutput(
 	const lines = output
 		.replaceAll("\r", "")
 		.split("\n")
+		.map((line) => line.trim())
 		.filter((line) => line.startsWith(prefix));
 	if (lines.length === 0) return {};
 	if (lines.length !== 1) throw new Error("trial command output must contain at most one metrics marker");
-	const encoded = lines[0]!.slice(prefix.length);
+	const encoded = lines[0]!.slice(prefix.length).trim();
 	if (encoded.length === 0 || encoded.length > 16_384) throw new Error("trial metrics JSON is empty or too large");
 	const parsed = JSON.parse(encoded) as unknown;
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

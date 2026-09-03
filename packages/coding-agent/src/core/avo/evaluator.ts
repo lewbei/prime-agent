@@ -118,13 +118,13 @@ class ArithmeticParser {
 
 export function deriveAvoDeterministicArithmeticContract(objective: string): AvoDeterministicArithmeticContract {
 	const normalized = objective.normalize("NFKC").replaceAll("×", "*").replaceAll("÷", "/").replaceAll("−", "-");
-	const candidates = (normalized.match(/[\d\s.,()+\-*/^%=]+/g) ?? [])
-		.map((item) => item.trim().replace(/^[,.\s]+|[,.\s]+$/g, ""))
-		.filter((item) => /\d/.test(item) && /[+\-*/^%=]/.test(item) && item.length <= 256);
+	const candidates = (normalized.match(/[\d\s.,()+\-*/^%=?]+/g) ?? [])
+		.map((item) => item.trim().replace(/^[,.\s=]+|[,.\s=?]+$/g, ""))
+		.filter((item) => /\d/.test(item) && /[+\-*/]/.test(item) && item.length <= 256);
 	if (candidates.length !== 1) {
 		throw new Error("the objective does not contain one host-supported arithmetic expression");
 	}
-	const rawExpression = candidates[0]!;
+	const rawExpression = candidates[0]!.replace(/^[,.\s=]+|[,.\s=?]+$/g, "");
 	for (const numericToken of rawExpression.match(/[\d,]+/g) ?? []) {
 		if (numericToken.includes(",") && !/^\d{1,3}(?:,\d{3})+$/.test(numericToken)) {
 			throw new Error("the objective contains an invalid or ambiguous digit-grouping separator");
@@ -261,7 +261,7 @@ export function classifyAvoHostEvaluationCommand(command: string): AvoHostComman
 	const patterns: Array<[AvoHostCommandEvaluator, RegExp]> = [
 		[
 			"test",
-			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?test\b|npx (?:(?:--yes|--no-install|-y) )?(?:vitest|jest)\b|(?:python3?|uv run) (?:-m )?pytest\b|pytest\b|cargo test\b|go test\b|dotnet test\b|mvn test\b|gradle test\b|node --test\b)/,
+			/^(?:(?:npm|pnpm|yarn|bun) (?:run )?test\b|npx (?:(?:--yes|--no-install|-y) )?(?:vitest|jest)\b|(?:(?:uv run\s+)?python3?|uv run) (?:-m )?(?:pytest|unittest)\b|pytest\b|cargo test\b|go test\b|dotnet test\b|mvn test\b|gradle test\b|node --test\b)/,
 		],
 		[
 			"build",
@@ -313,7 +313,10 @@ export function deriveAvoObservedTestIdentities(output: string): string[] {
 	const pytestIdentities = [
 		...normalized.matchAll(/^(.+?::.+?)\s+(?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)\b/gm),
 	].map((match, index) => `pytest:${index + 1}:${match[1]!.trim()}`);
-	const identities = [...nodeIdentities, ...pytestIdentities];
+	const unittestIdentities = [
+		...normalized.matchAll(/^(\S+\s+\([^)]+\))\s+\.\.\.\s+(?:ok|FAIL|ERROR|skipped)\b/gm),
+	].map((match, index) => `unittest:${index + 1}:${match[1]!.trim()}`);
+	const identities = [...nodeIdentities, ...pytestIdentities, ...unittestIdentities];
 	if (identities.length > 10_000 || identities.some((identity) => identity.length > 2_000)) return [];
 	return identities;
 }
@@ -357,6 +360,28 @@ function observedTestSummary(output: string): { units: number; passed: number; p
 			.filter((match) => match[2]?.toLowerCase() === "passed")
 			.reduce((sum, match) => sum + Number.parseInt(match[1]!, 10), 0);
 		if (units > 0) return { units, passed, parser: "pytest" };
+	}
+	const unittestMatch = /^Ran\s+(\d+)\s+tests?\s+in\s+[0-9.]+s/im.exec(normalized);
+	if (unittestMatch?.[1]) {
+		const units = Number.parseInt(unittestMatch[1], 10);
+		const outcomeLine = normalized.slice(unittestMatch.index + unittestMatch[0].length);
+		const okMatch = /^\s*OK(?:\s*\(([^)]+)\))?/im.exec(outcomeLine);
+		if (okMatch) {
+			const skipped = Number.parseInt(/skipped=(\d+)/i.exec(okMatch[1] ?? "")?.[1] ?? "0", 10);
+			return { units, passed: Math.max(0, units - skipped), parser: "python_unittest" };
+		}
+		const failedMatch = /^\s*FAILED\s*\(([^)]+)\)/im.exec(outcomeLine);
+		if (failedMatch?.[1]) {
+			const details = failedMatch[1];
+			const failures = Number.parseInt(/failures=(\d+)/i.exec(details)?.[1] ?? "0", 10);
+			const errors = Number.parseInt(/errors=(\d+)/i.exec(details)?.[1] ?? "0", 10);
+			const skipped = Number.parseInt(/skipped=(\d+)/i.exec(details)?.[1] ?? "0", 10);
+			return {
+				units,
+				passed: Math.max(0, units - failures - errors - skipped),
+				parser: "python_unittest",
+			};
+		}
 	}
 	const cargo =
 		/test result:\s+(?:ok|FAILED)\.\s+(\d+)\s+passed;\s+(\d+)\s+failed;\s+(\d+)\s+ignored;\s+(\d+)\s+measured/i.exec(
