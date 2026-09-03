@@ -4174,6 +4174,7 @@ export class AgentSession {
 		const snapshot = this._captureAvoProgressWatchdogSnapshot(this._avoRuntime.getState());
 		this._avoProgressWatchdog.prime(snapshot);
 		if (this._avoToolProgressRunId !== snapshot.runId) {
+			this._avoProgressWatchdog.reset();
 			this._avoToolProgressRunId = snapshot.runId;
 			this._avoToolProgressToken = snapshot.token;
 			this._avoToolNoProgressBatches = 0;
@@ -4201,6 +4202,9 @@ export class AgentSession {
 		}
 		const code = isObjectRecord(args) && typeof args.code === "string" ? args.code : "";
 		const recovery = this._avoToolRecoveryContract(state);
+		if (recovery.allowedCalls.length === 0) {
+			return undefined;
+		}
 		if (
 			recovery.allowedCalls.some((call) => new RegExp(`\\bawait\\s+(?:avo\\s*\\.\\s*)?${call}\\s*\\(`).test(code))
 		) {
@@ -9397,6 +9401,11 @@ export class AgentSession {
 		// hard budget here after first giving this in-flight assistant message a
 		// chance to provide canonical terminal evidence.
 		if (this._autonomousState.enabled && autonomousLimitReason(this._autonomousState)) {
+			return undefined;
+		}
+		const recovery = this._avoToolRecoveryContract(state);
+		if (recovery.allowedCalls.length === 0) {
+			this._recordCurrentAvoCanonicalDeliveryFailure(new Error(recovery.guidance));
 			return undefined;
 		}
 		const watchdog = this._assessAvoProgressWatchdog(

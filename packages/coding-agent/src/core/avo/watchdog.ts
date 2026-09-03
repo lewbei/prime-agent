@@ -150,6 +150,12 @@ export class AvoProgressWatchdog {
 	private consecutiveNoProgressTurns = 0;
 	private consecutiveDeliveryMismatchTurns = 0;
 
+	reset(): void {
+		this.previous = undefined;
+		this.consecutiveNoProgressTurns = 0;
+		this.consecutiveDeliveryMismatchTurns = 0;
+	}
+
 	prime(snapshot: AvoProgressWatchdogSnapshot): void {
 		if (this.previous?.runId === snapshot.runId) return;
 		this.previous = snapshot;
