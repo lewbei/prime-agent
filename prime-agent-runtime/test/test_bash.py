@@ -142,10 +142,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("fg", result.output)
                 # The shell stays alive as group leader, anchoring its background job.
                 os.killpg(handle.pid, 0)
-                records = await _poll_journal(journal, count=1)
+                records = await _poll_journal(journal, count=1, timeout=5.0)
                 self.assertTrue(records[-1]["active"])
                 handle.kill(signal.SIGKILL)
-                records = await _poll_journal(journal, count=2)
+                records = await _poll_journal(journal, count=2, timeout=5.0)
             self.assertFalse(records[-1]["active"])
 
     async def test_early_shell_exit_returns_and_kills_group(self):
@@ -727,7 +727,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         journal_calls = []
 
         def journal(pid, active):
-            journal_calls.append((pid, active))
+            if spawned and pid == spawned[0].pid:
+                journal_calls.append((pid, active))
             return True
 
         def terminate(job):
@@ -763,7 +764,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         journal_calls = []
 
         def journal(pid, active):
-            journal_calls.append((pid, active))
+            if spawned and pid == spawned[0].pid:
+                journal_calls.append((pid, active))
             return not active  # enrollment fails; the retirement write succeeds
 
         def terminate(job):
@@ -837,6 +839,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             return False
 
         def taskkill(pid):
+            if not spawned or pid != spawned[0].pid:
+                return True
             order.append(("taskkill", spawned[0].close.called))
             return True
 
@@ -949,7 +953,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             return proc
 
         def journal(pid, active):
-            journal_calls.append((pid, active))
+            if spawned and pid == spawned[0].pid:
+                journal_calls.append((pid, active))
             return not active  # enrollment fails -> _abort_spawn; retirement succeeds
 
         def terminate(job):
@@ -959,6 +964,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             return True
 
         def taskkill(pid):
+            if not spawned or pid != spawned[0].pid:
+                return True
             # Blocks INSIDE the killer's locked section: abort must wait on the lock.
             order.append(("killer-taskkill", spawned[0].close.called))
             tk_entered.set()
@@ -1122,26 +1129,34 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             self.skipTest("POSIX signal-delivery semantics")
         with tempfile.TemporaryDirectory() as tmp:
             journal = os.path.join(tmp, "journal.jsonl")
-            with mock.patch.dict(
-                os.environ,
-                {
-                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
-                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
-                },
-            ):
-                handle = bash("sleep 30")
-                try:
-                    records = await _poll_journal(journal, count=1)
-                    self.assertTrue(records[-1]["active"])
-                    with mock.patch.object(bash_module, "_signal_group", return_value=False):
-                        bash_module._kill_live_handles()
-                    await asyncio.sleep(0.2)  # give any (wrong) inactive write time to land
-                    records = await _poll_journal(journal, count=1)
-                    self.assertEqual(len(records), 1)
-                    self.assertTrue(records[-1]["active"])
-                finally:
-                    handle.kill(signal.SIGKILL)
-                    await asyncio.wait_for(handle, timeout=5)
+            with bash_module._live_lock:
+                saved_handles = set(bash_module._live_handles)
+                bash_module._live_handles.clear()
+            try:
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                        "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                    },
+                ):
+                    handle = bash("sleep 30")
+                    try:
+                        records = await _poll_journal(journal, count=1, timeout=5.0)
+                        self.assertTrue(records[-1]["active"])
+                        with mock.patch.object(bash_module, "_signal_group", return_value=False):
+                            bash_module._kill_live_handles()
+                        await asyncio.sleep(0.2)  # give any (wrong) inactive write time to land
+                        records = await _poll_journal(journal, count=1, timeout=5.0)
+                        self.assertEqual(len(records), 1)
+                        self.assertTrue(records[-1]["active"])
+                    finally:
+                        handle.kill(signal.SIGKILL)
+                        await asyncio.wait_for(handle, timeout=5)
+            finally:
+                with bash_module._live_lock:
+                    bash_module._live_handles.clear()
+                    bash_module._live_handles.update(saved_handles)
 
     async def test_signal_group_reports_delivery(self):
         if not bash_module._IS_POSIX:
@@ -1255,6 +1270,41 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             result = await bash("echo ok")
         self.assertEqual(result.exit_code, 0)
         self.assertIn("ok", result.output)
+
+    async def test_unjournaled_handle_never_pollutes_subsequently_configured_journal(self):
+        # A process spawned before a journal was configured must never write
+        # retirement records to a journal configured in os.environ later.
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL", None)
+            os.environ.pop("PRIME_AGENT_KERNEL_OWNER_PID", None)
+            handle = bash("sleep 0.1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.jsonl")
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL": journal,
+                    "PRIME_AGENT_KERNEL_OWNER_PID": str(os.getpid()),
+                },
+            ):
+                await handle
+                await asyncio.sleep(0.1)
+            # The late-configured journal must not contain records from the unjournaled handle.
+            self.assertFalse(os.path.exists(journal))
+
+    async def test_popen_handle_safely_reaped_when_is_posix_false(self):
+        # Popen objects lack .close(); mocking _IS_POSIX=False must check hasattr
+        # before invoking close().
+        handle = bash("echo ok")
+        await handle
+        with (
+            mock.patch.object(bash_module, "_IS_POSIX", False),
+            mock.patch.object(bash_module, "_taskkill_tree", return_value=True),
+        ):
+            # Must not raise AttributeError: 'Popen' object has no attribute 'close'
+            delivered = handle._reap_group()
+            self.assertTrue(delivered)
 
 
 async def _poll_group_dead(pgid: int, timeout: float = 5.0) -> None:

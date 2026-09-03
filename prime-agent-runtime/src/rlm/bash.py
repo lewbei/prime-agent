@@ -206,9 +206,13 @@ class BashHandle:
                 os.close(status_write)
         self._pid: int = self._proc.pid
         self._released = False
+        self._journal_path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
+        self._journal_owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
         with _live_lock:
             _live_handles.add(self)
-        enrolled = _record_journal(self._pid, active=True)
+        enrolled = _dispatch_record_journal(
+            self._pid, active=True, path=self._journal_path, owner=self._journal_owner
+        )
         if not enrolled:
             # Fail closed: a configured journal that cannot enroll the pid must
             # not let the command run (the host reaper would never see it).
@@ -406,11 +410,13 @@ class BashHandle:
         with self._kill_lock:
             delivered = self._reap_group()
             self._reaped = True
-            if not _IS_POSIX:
+            if not _IS_POSIX and hasattr(self._proc, "close"):
                 # Reaped: pid fallbacks are gone, so the handle may finally close.
-                cast("_winjob.JobProcess", self._proc).close()
+                self._proc.close()
         if delivered:
-            _record_journal(self._pid, active=False)
+            _dispatch_record_journal(
+                self._pid, active=False, path=self._journal_path, owner=self._journal_owner
+            )
         with _live_lock:
             _live_handles.discard(self)
 
@@ -627,13 +633,15 @@ class BashHandle:
             pass
         with self._kill_lock:
             self._reaped = True
-            if not _IS_POSIX:
+            if not _IS_POSIX and hasattr(self._proc, "close"):
                 # Reaped commits before close: later lock holders skip raw-pid fallbacks.
-                cast("_winjob.JobProcess", self._proc).close()
+                self._proc.close()
         with _live_lock:
             _live_handles.discard(self)
         if delivered:
-            _record_journal(self._pid, active=False)
+            _dispatch_record_journal(
+                self._pid, active=False, path=self._journal_path, owner=self._journal_owner
+            )
 
     def __await__(self) -> Generator[Any, None, BashResult]:
         # A handle awaited before any other API use is a one-shot command tied
@@ -812,12 +820,28 @@ def _process_start_id(pid: int) -> str | None:
         return None
 
 
-def _record_journal(pid: int, active: bool) -> bool:
+_UNSET = object()
+
+
+def _dispatch_record_journal(
+    pid: int, active: bool, path: Any = _UNSET, owner: Any = _UNSET
+) -> bool:
+    try:
+        return _record_journal(pid, active, path=path, owner=owner)
+    except TypeError:
+        return _record_journal(pid, active)
+
+
+def _record_journal(
+    pid: int, active: bool, path: Any = _UNSET, owner: Any = _UNSET
+) -> bool:
     # Returns False only when the journal is configured but enrollment failed;
     # active-record callers must then fail closed. Active records always carry
     # a processStartId so host reaping stays identity-verified.
-    path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
-    owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
+    if path is _UNSET:
+        path = os.environ.get("PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL")
+    if owner is _UNSET:
+        owner = os.environ.get("PRIME_AGENT_KERNEL_OWNER_PID")
     if not path or not owner:
         return True
     try:
@@ -878,7 +902,12 @@ def _kill_live_handles() -> None:
                     except OSError:
                         pass
         if delivered:
-            _record_journal(handle._pid, active=False)
+            _dispatch_record_journal(
+                handle._pid,
+                active=False,
+                path=handle._journal_path,
+                owner=handle._journal_owner,
+            )
 
 
 def _install_shutdown_hook() -> None:
