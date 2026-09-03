@@ -1751,6 +1751,45 @@ export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: Av
 		"edit",
 	]);
 	const workspaceDeicticCoding = workspaceDeicticReference && workspaceWorkRequest.length > 0;
+	const externalServiceSignals = matchingSignals(normalized, [
+		"github.com",
+		"gitlab.com",
+		"linear.app",
+		"create issue",
+		"create issues",
+		"file issue",
+		"file an issue",
+		"open issue",
+		"open an issue",
+		"post issue",
+		"post an issue",
+		"gh issue",
+		"submit issue",
+		"submit an issue",
+	]);
+	const metaInquirySignals = matchingSignals(normalized, [
+		"why was there",
+		"why did you",
+		"why is there",
+		"why did it",
+		"how are you so sure",
+		"what happened",
+		"explain why",
+		"can you explain",
+	]);
+	if (externalServiceSignals.length > 0 && !workspaceDeicticCoding) {
+		return {
+			environment: "general",
+			reasons: [`external service or issue tracking request: ${externalServiceSignals.join(", ")}`],
+		};
+	}
+	if (metaInquirySignals.length > 0 && !workspaceDeicticCoding) {
+		return {
+			environment: "general",
+			reasons: [`conversational meta inquiry: ${metaInquirySignals.join(", ")}`],
+		};
+	}
+
 	const artifactSignals = normalized.match(
 		/(?:^|[\s`'"(])(?:[\w./-]+\.(?:c|cc|cpp|cs|go|java|js|jsx|kt|php|py|rb|rs|sh|sql|swift|ts|tsx|vue)|package\.json|pyproject\.toml|cargo\.toml)(?:$|[\s`'"),:])/g,
 	);
