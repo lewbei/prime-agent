@@ -757,6 +757,12 @@ export class AvoSessionRuntime {
 }
 
 export function buildAvoRuntimePrompt(state: AvoRunState, memoryContext = ""): string {
+	if (state.routing.bypass) {
+		return [
+			"This is a conversational turn (greeting, acknowledgment, or small talk).",
+			"AVO tool execution, candidate registration, and cycle completion are not required for this turn. Reply directly and naturally to the user.",
+		].join(" ");
+	}
 	const ablations = activeAvoAblations();
 	const onlineEvidenceRequired = state.routing.reasons.some((reason) =>
 		reason.startsWith("online evidence required:"),

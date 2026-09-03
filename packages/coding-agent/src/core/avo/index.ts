@@ -171,6 +171,7 @@ export {
 	inferAvoHorizon,
 	inferAvoOnlineEvidencePolicy,
 	inferAvoVerificationPolicy,
+	isAvoConversationalTurn,
 	parseAvoAssumptionResolutionInput,
 	parseAvoCandidateInput,
 	parseAvoCriticalAssumptionInput,

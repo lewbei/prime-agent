@@ -1536,6 +1536,89 @@ function matchingUnnegatedSignals(value: string, signals: readonly string[]): st
 	});
 }
 
+const CONVERSATIONAL_PATTERNS = [
+	/^(?:hi|hello|hey|howdy|yo|greetings)(?:\s+(?:there|friend|all))?(?:\s+(?:how\s+are\s+you(?:\s+doing)?(?:\s+today)?|what's\s+up|whats\s+up))?$/i,
+	/^(?:good\s+(?:morning|afternoon|evening|day|night))(?:\s+(?:there|friend|all))?$/i,
+	/^(?:how\s+are\s+you(?:\s+doing)?(?:\s+today)?|how's\s+it\s+going|hows\s+it\s+going|what's\s+up|whats\s+up|sup)$/i,
+	/^(?:nice\s+to\s+meet\s+you|who\s+are\s+you|what\s+can\s+you\s+do)$/i,
+	/^(?:thanks|thank\s+you)(?:\s+(?:a\s+lot|very\s+much|so\s+much))?$/i,
+	/^(?:ok|okay|got\s+it|sounds\s+good|cool|great|awesome|perfect|understood|sure|yep|yes|no\s+problem)(?:\s+(?:thanks|thank\s+you))?$/i,
+	/^(?:great|awesome|cool|perfect|ok|okay)[,\s]+(?:thanks|thank\s+you)(?:\s+(?:a\s+lot|very\s+much|so\s+much))?$/i,
+];
+
+const CONVERSATIONAL_DISQUALIFIERS = [
+	"fix",
+	"debug",
+	"test",
+	"build",
+	"implement",
+	"refactor",
+	"compile",
+	"patch",
+	"commit",
+	"merge",
+	"add",
+	"create",
+	"delete",
+	"update",
+	"edit",
+	"change",
+	"modify",
+	"remove",
+	"install",
+	"configure",
+	"parser",
+	"function",
+	"class",
+	"module",
+	"api",
+	"cli",
+	"app",
+	"script",
+	"bug",
+	"repo",
+	"repository",
+	"code",
+	"codebase",
+	"issue",
+	"branch",
+	"git",
+	"file",
+	"research",
+	"paper",
+	"literature",
+	"benchmark",
+	"calculate",
+	"compute",
+	"evaluate",
+	"search",
+	"look up",
+	"write a",
+	"write an",
+	"generate a",
+	"generate an",
+	"poem",
+	"report",
+	"document",
+];
+
+export function isAvoConversationalTurn(prompt: string): boolean {
+	const trimmed = prompt.trim();
+	if (!trimmed || trimmed.length > 120 || trimmed.includes("\n")) return false;
+	if (/\d/.test(trimmed)) return false;
+	if (/[/\\`{}[\]()=><$*]/.test(trimmed)) return false;
+	if (/\.([a-z0-9]{1,6})\b/i.test(trimmed)) return false;
+
+	const normalized = trimmed.toLowerCase();
+	if (matchingSignals(normalized, CONVERSATIONAL_DISQUALIFIERS).length > 0) return false;
+
+	const cleaned = normalized
+		.replace(/[^\w\s']/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+	return CONVERSATIONAL_PATTERNS.some((pattern) => pattern.test(cleaned) || pattern.test(normalized));
+}
+
 export function inferAvoEnvironment(prompt: string, cwd = ""): { environment: AvoEnvironment; reasons: string[] } {
 	const normalized = prompt.toLowerCase();
 	const researchSignals = matchingSignals(normalized, [
@@ -3247,11 +3330,28 @@ export class AvoStore {
 	routePrompt(prompt: string, preserveTaskConstraints = true): AvoRoutingDecision {
 		this.assertTaskMutationAllowed("prompt routing");
 		const normalized = requireString(prompt, "prompt");
+		const isConversational = isAvoConversationalTurn(normalized);
+		if (isConversational && this.state.environmentSelection === "auto") {
+			const decision: AvoRoutingDecision = {
+				environment: "general",
+				horizon: "direct",
+				source: "host_auto",
+				reasons: ["conversational turn bypass: greeting, acknowledgment, or small talk without actionable tasks"],
+				decidedAt: this.now(),
+				bypass: true,
+			};
+			this.state.routing = decision;
+			this.state.verificationPolicy = "not_applicable";
+			this.state.verificationClass = "subjective";
+			this.state.verificationReasons = ["conversational turn bypass: no verification or candidate cycle required"];
+			this.save();
+			return structuredClone(decision);
+		}
 		const inferredEnvironment = inferAvoEnvironment(normalized, this.cwd);
 		const hasTrajectory = this.state.candidates.length > 0 || this.state.cycles.length > 0;
 		const environment =
 			this.state.environmentSelection === "auto"
-				? preserveTaskConstraints || hasTrajectory
+				? (preserveTaskConstraints && !this.state.routing.bypass) || hasTrajectory
 					? this.state.routing.environment
 					: inferredEnvironment.environment
 				: this.state.environmentSelection;
@@ -3260,6 +3360,7 @@ export class AvoStore {
 		const inferredOnlineEvidence = inferAvoOnlineEvidencePolicy(normalized);
 		const preserveOnlineEvidence =
 			preserveTaskConstraints &&
+			!this.state.routing.bypass &&
 			this.state.routing.reasons.some((reason) => reason.startsWith("online evidence required:"));
 		const horizonRank: Record<AvoHorizon, number> = { direct: 0, iterative: 1, long: 2 };
 		const horizon =
@@ -3275,7 +3376,7 @@ export class AvoStore {
 				this.state.environmentSelection === "auto" && this.state.horizonSelection === "auto" ? "host_auto" : "user",
 			reasons: [
 				...(this.state.environmentSelection === "auto"
-					? preserveTaskConstraints || hasTrajectory
+					? (preserveTaskConstraints && !this.state.routing.bypass) || hasTrajectory
 						? [`preserved active ${environment} trajectory`]
 						: inferredEnvironment.reasons
 					: [`environment overridden to ${environment}`]),
@@ -3289,6 +3390,7 @@ export class AvoStore {
 						: ["online evidence not required: task is locally or temporally self-contained"]),
 			],
 			decidedAt: this.now(),
+			bypass: false,
 		};
 		this.state.routing = decision;
 		const policyRank: Record<AvoVerificationPolicy, number> = {
@@ -3306,6 +3408,7 @@ export class AvoStore {
 		};
 		const preserveExistingVerification =
 			preserveTaskConstraints &&
+			!this.state.routing.bypass &&
 			(policyRank[this.state.verificationPolicy] > policyRank[inferredVerification.policy] ||
 				(policyRank[this.state.verificationPolicy] === policyRank[inferredVerification.policy] &&
 					classRank[this.state.verificationClass] >= classRank[inferredVerification.verificationClass]));
@@ -5670,6 +5773,19 @@ export class AvoStore {
 	}
 
 	evaluateStopGate(): AvoStopGate {
+		if (this.state.routing.bypass) {
+			return {
+				passed: true,
+				checks: [
+					{
+						id: "conversational_bypass",
+						label: "Conversational bypass turn",
+						passed: true,
+					},
+				],
+				reasons: [],
+			};
+		}
 		return this.finalizeCanonicalDeliveryStopGate(
 			evaluateGenericAvoStopGate(this.state.candidates, this.state.evaluations),
 		);
