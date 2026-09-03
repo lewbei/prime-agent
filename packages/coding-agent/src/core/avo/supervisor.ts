@@ -11,7 +11,13 @@ export function parseAvoSupervisorPayload(message: string, expectedCycleId: stri
 	const marker = `AVO_SUPERVISION_JSON:${expectedCycleId}`;
 	const markerIndex = message.indexOf(marker);
 	if (markerIndex < 0) throw new Error(`supervisor response omitted ${marker}`);
-	const jsonText = message.slice(markerIndex + marker.length).trim();
+	let jsonText = message.slice(markerIndex + marker.length).trim();
+	if (jsonText.startsWith("```")) {
+		jsonText = jsonText
+			.replace(/^```(?:json)?\s*\n?/, "")
+			.replace(/\n?```\s*$/, "")
+			.trim();
+	}
 	const parsed = JSON.parse(jsonText) as unknown;
 	if (!isRecord(parsed)) throw new Error("AVO supervisor response must be a JSON object");
 	if (parsed.cycle_id !== expectedCycleId) throw new Error("AVO supervisor response references another cycle");

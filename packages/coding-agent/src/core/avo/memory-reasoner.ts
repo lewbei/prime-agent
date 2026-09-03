@@ -43,7 +43,13 @@ function markerPayload(text: string, marker: string): Record<string, unknown> {
 	if (markerIndex < 0 || text.indexOf(marker, markerIndex + marker.length) >= 0) {
 		throw new Error("memory reasoner reply omitted its unique host marker");
 	}
-	const suffix = text.slice(markerIndex + marker.length).trim();
+	let suffix = text.slice(markerIndex + marker.length).trim();
+	if (suffix.startsWith("```")) {
+		suffix = suffix
+			.replace(/^```(?:json)?\s*\n?/, "")
+			.replace(/\n?```\s*$/, "")
+			.trim();
+	}
 	if (!suffix.startsWith("{")) throw new Error("memory reasoner marker must be followed by one JSON object");
 	const parsed = JSON.parse(suffix) as unknown;
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {

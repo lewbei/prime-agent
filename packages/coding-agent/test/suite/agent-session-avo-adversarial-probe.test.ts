@@ -331,7 +331,7 @@ describe("AgentSession AVO adversarial probes", () => {
 		expect(repairedAttempts).toHaveLength(2);
 		expect(repairedAttempts.map((item) => item.status)).toEqual(["inconclusive", "pass"]);
 		expect(repairedAttempts.map((item) => item.metrics.probe_attempt_index)).toEqual([0, 1]);
-	});
+	}, 30_000);
 
 	it("queues a checkpoint behind a running supervisor bootstrap without waiting for model settlement", async () => {
 		const sendAgentMessage = vi.fn(

@@ -242,7 +242,11 @@ function impactKind(path: string): AvoImpactSurface["kind"] | undefined {
 	if (
 		["package.json", "pyproject.toml", "cargo.toml", "go.mod", "tsconfig.json", "vite.config.ts"].includes(name) ||
 		/(?:^|\/)(?:config|configs)\//.test(normalized) ||
-		/\.(?:ya?ml|toml|ini)$/.test(name)
+		/\.(?:ya?ml|toml|ini|lock)$/.test(name) ||
+		/(?:^|\/)(?:biome|deno|\.?(?:prettier|eslint|babel|ruff|flake8|pytest|vitest|jest|webpack|rollup|tslint))[^/]*\.json$/.test(
+			name,
+		) ||
+		/^(?:package-lock|pnpm-lock|yarn|cargo|uv|composer)\.(?:json|yaml|yml|lock)$/.test(name)
 	) {
 		return "configuration";
 	}
