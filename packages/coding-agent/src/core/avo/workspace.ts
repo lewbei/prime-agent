@@ -617,10 +617,20 @@ const PYTHON_SHADOW_NAMES = [
 ] as const;
 
 function verificationRunnerFamily(command: string): AvoVerificationHarnessManifest["runnerFamily"] {
-	if (/(?:^|\s)(?:pytest|py\.test)(?:\s|$)|(?:python3?|python)\s+-m\s+pytest(?:\s|$)/i.test(command)) {
+	if (
+		/(?:^|\s)(?:pytest|py\.test)(?:\s|$)|(?:(?:uv run\s+)?python3?|uv run)\s+(?:-m\s+)?(?:pytest|unittest)(?:\s|$)/i.test(
+			command,
+		)
+	) {
 		return "pytest";
 	}
-	if (/(?:^|\s)(?:vitest|jest|node\s+--test)(?:\s|$)/i.test(command)) return "node_test";
+	if (
+		/(?:^|\s)(?:vitest|jest|node\s+--test)(?:\s|$)|^(?:npx (?:(?:--yes|--no-install|-y) )?)?(?:vitest|jest)\b/i.test(
+			command,
+		)
+	) {
+		return "node_test";
+	}
 	return "other";
 }
 
@@ -689,13 +699,21 @@ function hasClosedVerificationRunner(
 	command: string,
 	runnerFamily: AvoVerificationHarnessManifest["runnerFamily"],
 ): boolean {
-	const tokens = shellCommandTokens(command);
+	let tokens = shellCommandTokens(command);
+	if (tokens[0] === "uv" && tokens[1] === "run") {
+		tokens = tokens.slice(2);
+	} else if (tokens[0] === "npx") {
+		tokens = tokens.slice(1);
+		while (tokens[0] && (tokens[0] === "--yes" || tokens[0] === "-y" || tokens[0] === "--no-install")) {
+			tokens = tokens.slice(1);
+		}
+	}
 	const executable = tokens[0]?.split(/[\\/]/).at(-1)?.toLowerCase() ?? "";
 	if (runnerFamily === "pytest") {
 		if (/^(?:pytest|py\.test)(?:\.exe)?$/.test(executable)) return true;
 		if (!/^python(?:3(?:\.\d+)?)?(?:\.exe)?$/.test(executable)) return false;
 		const moduleIndex = tokens.indexOf("-m");
-		return moduleIndex > 0 && tokens[moduleIndex + 1] === "pytest";
+		return moduleIndex > 0 && (tokens[moduleIndex + 1] === "pytest" || tokens[moduleIndex + 1] === "unittest");
 	}
 	if (runnerFamily === "node_test") {
 		if (/^(?:vitest|jest)(?:\.cmd|\.ps1|\.sh)?$/.test(executable)) return true;
@@ -916,7 +934,9 @@ export function captureAvoVerificationHarnessManifest(
 		unsupportedReasons.push("pytest output capture must remain fd-bound for authoritative result parsing");
 	}
 	if (runnerFamily === "pytest" && !pytestVerboseIdentityIsEnabled(command)) {
-		unsupportedReasons.push("pytest verification requires -v or --verbose to bind executed test identities");
+		unsupportedReasons.push(
+			"pytest or unittest verification requires -v or --verbose to bind executed test identities",
+		);
 	}
 	if (process.platform !== "linux" || !existsSync("/usr/bin/bwrap")) {
 		unsupportedReasons.push("the read-only Linux verification sandbox is unavailable");
@@ -1214,8 +1234,16 @@ export function captureAvoVerificationHarnessManifest(
 				"stdlib_modules = set(getattr(sys, 'stdlib_module_names', ()))",
 				"unresolved_modules = sorted(module for module in external_modules if module not in stdlib_modules and not package_map.get(module))",
 				"if unresolved_modules: raise RuntimeError('unresolved Python verifier dependencies: ' + ', '.join(unresolved_modules))",
-				"distribution_names = {'pytest'}",
-				"distribution_modules = {'pytest': {'pytest'}}",
+				`is_pytest_runner = ${JSON.stringify(/(?:^|\s)(?:pytest|py\.test)(?:\s|$)|-m\s+pytest\b/i.test(command))}`,
+				"distribution_names = set()",
+				"distribution_modules = {}",
+				"try:",
+				"    metadata.distribution('pytest')",
+				"    distribution_names.add('pytest')",
+				"    distribution_modules['pytest'] = {'pytest'}",
+				"except Exception:",
+				"    if is_pytest_runner:",
+				"        raise RuntimeError('pytest is not installed')",
 				"for entry_point in pytest_entry_points:",
 				"    if entry_point.dist is None: continue",
 				"    name = entry_point.dist.metadata.get('Name') or ''",
@@ -1357,7 +1385,10 @@ export function assessAvoTestTrust(
 	});
 	const explicitBaselineTargets = explicit.filter((target) => unchanged.has(target)).length;
 	const observedBaselineTestFiles = [...new Set(explicit.filter((target) => unchanged.has(target)))];
-	const selectionCommand = command.trim().replace(/^(?:python3?|uv run)\s+-m\s+pytest\b/i, "pytest");
+	const selectionCommand = command
+		.trim()
+		.replace(/^(?:(?:uv run\s+)?python3?|uv run)\s+(?:-m\s+)?(?:pytest|unittest)\b/i, "pytest")
+		.replace(/^(?:npx (?:(?:--yes|--no-install|-y) )?)?(?:vitest|jest)\b/i, "test");
 	const narrowedSelection =
 		/(?:^|\s)(?:-k|-m|-t|-c|-list|-skip|--config|--dir|--root|--workspace|--grep|--test-name-pattern|--test-skip-pattern|--testNamePattern|--testPathPattern|--testPathIgnorePatterns|--test-path-ignore-patterns|--changed|--related|--deselect|--ignore|--ignore-glob|--exclude|--shard|--splits?|--partition|--project|--last-failed|--lf|--failed-first|--ff|--stepwise|--sw|--globalSetup|--globalTeardown|--import|--loader|--require|--reporter|--setupFiles|--setupFilesAfterEnv|--test-reporter|-run)(?:[=\s]|$)/i.test(
 			selectionCommand,
