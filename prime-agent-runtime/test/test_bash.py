@@ -904,6 +904,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
     async def test_kill_live_handles_skips_reaped_windows_handle(self):
         stale = mock.Mock(_kill_lock=threading.Lock(), _reaped=True, _job=5, _pid=999)
         with bash_module._live_lock:
+            saved_handles = set(bash_module._live_handles)
+            bash_module._live_handles.clear()
             bash_module._live_handles.add(stale)
         try:
             with mock.patch.object(bash_module, "_IS_POSIX", False):
@@ -913,7 +915,8 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                             bash_module._kill_live_handles()
         finally:
             with bash_module._live_lock:
-                bash_module._live_handles.discard(stale)
+                bash_module._live_handles.clear()
+                bash_module._live_handles.update(saved_handles)
         term.assert_not_called()
         taskkill.assert_not_called()
         stale._proc.kill.assert_not_called()
@@ -964,49 +967,56 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
 
         self.enterContext(mock.patch.dict(os.environ, {"PRIME_AGENT_BASH_SHELL": "/bin/sh"}))
         loop = asyncio.get_running_loop()
-        with mock.patch.object(bash_module, "_IS_POSIX", False):
-            with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
-                with mock.patch.object(bash_module._winjob, "create_job", return_value=900):
-                    with mock.patch.object(
-                        bash_module._winjob, "terminate", side_effect=terminate
-                    ) as term:
+        with bash_module._live_lock:
+            saved_handles = set(bash_module._live_handles)
+            bash_module._live_handles.clear()
+        try:
+            with mock.patch.object(bash_module, "_IS_POSIX", False):
+                with mock.patch.object(bash_module._winjob, "spawn_in_job", spawn):
+                    with mock.patch.object(bash_module._winjob, "create_job", return_value=900):
                         with mock.patch.object(
-                            bash_module._winjob, "close",
-                            side_effect=lambda job: order.append("abort-jobclose"),
-                        ):
-                            with mock.patch.object(bash_module, "_record_journal", journal):
-                                with mock.patch.object(
-                                    bash_module, "_taskkill_tree", side_effect=taskkill
-                                ):
-                                    ctor = loop.run_in_executor(
-                                        None, lambda: bash("echo hi")
-                                    )
-                                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
-                                    # Phase 1: abort holds _kill_lock -> the killer blocks.
-                                    killer = loop.run_in_executor(
-                                        None, bash_module._kill_live_handles
-                                    )
-                                    await asyncio.sleep(0.2)
-                                    self.assertFalse(killer.done())
-                                    self.assertFalse(tk_entered.is_set())
-                                    # Phase 2: abort parks at stdout; the killer takes the
-                                    # lock and blocks inside taskkill while holding it.
-                                    release_term.set()
-                                    self.assertTrue(
-                                        await asyncio.to_thread(tk_entered.wait, 5)
-                                    )
-                                    stdout_release.set()
-                                    # Abort finishes stdout/wait but must block on the
-                                    # lock: close cannot run while taskkill is in flight.
-                                    await asyncio.sleep(0.3)
-                                    self.assertFalse(ctor.done())
-                                    self.assertFalse(spawned[0].close.called)
-                                    # Phase 3: taskkill returns, killer releases the lock,
-                                    # abort's reaped+close section finally runs.
-                                    tk_release.set()
-                                    with self.assertRaisesRegex(RuntimeError, "journal"):
-                                        await asyncio.wait_for(ctor, timeout=10)
-                                    await asyncio.wait_for(killer, timeout=10)
+                            bash_module._winjob, "terminate", side_effect=terminate
+                        ) as term:
+                            with mock.patch.object(
+                                bash_module._winjob, "close",
+                                side_effect=lambda job: order.append("abort-jobclose"),
+                            ):
+                                with mock.patch.object(bash_module, "_record_journal", journal):
+                                    with mock.patch.object(
+                                        bash_module, "_taskkill_tree", side_effect=taskkill
+                                    ):
+                                        ctor = loop.run_in_executor(
+                                            None, lambda: bash("echo hi")
+                                        )
+                                        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                                        # Phase 1: abort holds _kill_lock -> the killer blocks.
+                                        killer = loop.run_in_executor(
+                                            None, bash_module._kill_live_handles
+                                        )
+                                        await asyncio.sleep(0.2)
+                                        self.assertFalse(killer.done())
+                                        self.assertFalse(tk_entered.is_set())
+                                        # Phase 2: abort parks at stdout; the killer takes the
+                                        # lock and blocks inside taskkill while holding it.
+                                        release_term.set()
+                                        self.assertTrue(
+                                            await asyncio.to_thread(tk_entered.wait, 5)
+                                        )
+                                        stdout_release.set()
+                                        # Abort finishes stdout/wait but must block on the
+                                        # lock: close cannot run while taskkill is in flight.
+                                        await asyncio.sleep(0.3)
+                                        self.assertFalse(ctor.done())
+                                        self.assertFalse(spawned[0].close.called)
+                                        # Phase 3: taskkill returns, killer releases the lock,
+                                        # abort's reaped+close section finally runs.
+                                        tk_release.set()
+                                        with self.assertRaisesRegex(RuntimeError, "journal"):
+                                            await asyncio.wait_for(ctor, timeout=10)
+                                        await asyncio.wait_for(killer, timeout=10)
+        finally:
+            with bash_module._live_lock:
+                bash_module._live_handles.update(saved_handles)
         self.assertEqual(
             order,
             ["abort-terminate", "abort-jobclose", ("killer-taskkill", False), "proc-close"],
